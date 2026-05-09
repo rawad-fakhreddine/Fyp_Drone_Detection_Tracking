@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 """
-ibvs_controller_node.py  —  v6.13  (3m hold + faster closing)
-==============================================================
+ibvs_controller_node.py  —  v6.15-M8  (PPO v5.1 enabled)
+==========================================================
+AI-Based Drone-to-Drone Detection and Tracking
+Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
-Changes from v6.12:
-  * alpha_star: 0.0038 → 0.0067   (hold ≈4m → ≈3m)
-  * K_far: 10.0 → 14.0            (faster closing — vx ≈ 0.6m/s when target far)
-  * err_a_max: 0.012 → 0.018      (proportional to new alpha_star)
-  * HOLD entry err_a: 0.0025 → 0.005 (proportional)
-  * PPO clamp: [0.002, 0.008] → [0.003, 0.012]
+M8 changes from v6.15:
+  * USE_PPO = True (was False)
+  * PPO alpha clamp: [0.003, 0.012] → [0.003, 0.020] (matches v5.1 training range)
+  * Throttled log now shows PPO alpha* and lambda when active
 
-Diagnosis: M7.2 v6.12 produced cmd_vx=0.34 m/s mean during HOLD with target
-at ~6m. Target moves at 0.4-0.7 m/s. Chaser couldn't close the gap because
-its forward speed at typical err_a level was below target speed. Raising
-K_far to 14 produces vx≈0.6 m/s at typical err_a, enough to close.
-
-Carried over: BODY-FRAME publisher, max_vx=0.7, max_vy=0.85.
+All other gains, thresholds, and phase logic unchanged from v6.15.
 """
 
 import rospy
@@ -38,7 +33,8 @@ class IBVSController:
     def __init__(self):
         rospy.init_node('ibvs_controller_node')
 
-        self.USE_PPO = False
+        # ── M8: PPO ENABLED ──────────────────────────────────────────
+        self.USE_PPO = True
 
         # Camera
         self.img_w  = 640.0
@@ -48,24 +44,18 @@ class IBVSController:
         self.area_norm = self.img_w * self.img_h
         self.pitch_compensation_gain = 0.8
 
-        # ── Setpoints (M7.2 v6.13: 3m hold) ─────────────────────────────────
-        # alpha_star = 0.0067 corresponds to ~3m chaser-to-target distance
+        # ── Setpoints ────────────────────────────────────────────────
         self.x_star     = 0.0
         self.y_star     = 0.0
         self.alpha_star = 0.0067
         self.lam        = 0.5
 
-        # ── Distance gains (M7.2 v6.13: K_far raised) ──────────────────────
-        # K_far = 14 produces vx = 14·sqrt(0.005)·0.65 ≈ 0.64 m/s at typical
-        # err_a in HOLD. Was 10 → produced only 0.46 m/s, slower than target's
-        # 0.4-0.7 m/s speed regimes. Now chaser can actually close the gap.
+        # ── Distance gains ───────────────────────────────────────────
         self.K_far  = 14.0
         self.K_near = 6.0
 
         # Y / Z / yaw PID
         self.Kp_y,  self.Ki_y,  self.Kd_y   = 1.4, 0.05, 0.3
-        # M7.2 v6.14: Kp_z raised 1.2 → 1.8 to track fast vertical target motion.
-        # At err_y=0.15, old: vz=0.12 m/s (too slow). New: vz=0.18 m/s.
         self.Kp_z,  self.Ki_z,  self.Kd_z   = 1.8, 0.04, 0.5
         self.Kp_wz, self.Ki_wz, self.Kd_wz  = 0.9, 0.0,  0.15
 
@@ -73,21 +63,14 @@ class IBVSController:
         self.max_vx         = 0.70
         self.max_vx_retreat = 0.50
         self.max_vy         = 0.85
-        # M7.2 v6.14: max_vz raised 0.5 → 0.8. Target's climb_dive mode hits
-        # 0.7 m/s vertical, chaser needs margin to actually catch up.
         self.max_vz         = 0.8
         self.max_wz         = 0.4
 
         # Phase thresholds
-        # M7.2 v6.15: min_altitude_safe raised 1.0 → 6.0. Chaser climbs to 6m
-        # in SEARCH (above tree canopy), then any descent during APPROACH/HOLD
-        # is clamped at 6m. Prevents tree collisions when target descends.
         self.min_altitude_safe = 1.0
         self.alpha_min_valid   = 0.0005
 
-        # ── Error saturation (M7.2 v6.13: rescaled) ────────────────────────
-        # err_a_max = 0.018: at alpha_star=0.0067, caps err_a at +0.018 →
-        # alpha=0.025 (chaser ~1.5m away, must retreat hard).
+        # Error saturation
         self.err_x_max = 0.8
         self.err_y_max = 0.8
         self.err_a_max = 0.018
@@ -162,12 +145,13 @@ class IBVSController:
         self.dt   = 1.0 / 20.0
         self.rate = rospy.Rate(20)
 
-        rospy.loginfo("[IBVS] v6.15 started (PPO=%s) "
-                      "alpha_star=%.4f hold≈3m | max_vx=%.2f max_vz=%.2f Kp_z=%.1f "
+        rospy.loginfo("[IBVS] v6.15-M8 started (PPO=%s) "
+                      "alpha_star=%.4f hold~3m | max_vx=%.2f max_vz=%.2f Kp_z=%.1f "
                       "min_alt=%.1fm"
                       % ("ON" if self.USE_PPO else "OFF",
                          self.alpha_star, self.max_vx, self.max_vz,
                          self.Kp_z, self.min_altitude_safe))
+        rospy.loginfo("[IBVS] PPO alpha clamp: [0.003, 0.020]  lambda clamp: [0.3, 1.0]")
         rospy.loginfo("[IBVS] Publishing to /mavros/setpoint_raw/local "
                       "(FRAME_BODY_NED, mask=0x%X)" % BODY_VEL_TYPE_MASK)
         rospy.loginfo("[IBVS] Waiting for takeoff_node to signal ready...")
@@ -216,9 +200,8 @@ class IBVSController:
             return
         self.x_star     = np.clip(float(msg.x), -0.3, 0.3)
         self.y_star     = np.clip(float(msg.y), -0.3, 0.3)
-        # PPO clamp rescaled: [0.003, 0.012] gives PPO authority over
-        # ~2.3m to ~4.7m chaser-to-target distance.
-        self.alpha_star = np.clip(float(msg.z), 0.003, 0.012)
+        # ── M8: PPO clamp matches v5.1 training range [0.003, 0.020] ──
+        self.alpha_star = np.clip(float(msg.z), 0.003, 0.020)
         self.lam        = np.clip(float(msg.w), 0.3, 1.0)
         self.last_ppo_time = rospy.Time.now()
 
@@ -347,12 +330,10 @@ class IBVSController:
                 publish_cmd = False
 
             elif self.phase == "SEARCH":
-                # M7.2 v6.15: climb cap raised 0.30 → 0.50 since target altitude
-                # is now 6m (vs old 1m), need faster ascent to avoid long SEARCH.
                 alt_err = self.min_altitude_safe - self.altitude
                 cmd_vz = float(np.clip(alt_err * 0.3, -0.20, 0.30))
                 if self.got_real_detection and self.alpha > self.alpha_min_valid:
-                    rospy.loginfo("[IBVS] Target acquired α=%.4f → APPROACH (ramping)"
+                    rospy.loginfo("[IBVS] Target acquired a=%.4f -> APPROACH (ramping)"
                                   % self.alpha)
                     self.reset_pid()
                     self.approach_start_time = rospy.Time.now()
@@ -361,7 +342,7 @@ class IBVSController:
             elif self.phase == "APPROACH":
                 det_age = self.time_since_detection()
                 if det_age > self.detection_timeout:
-                    rospy.logwarn("[IBVS] Lost target (%.1fs) → SEARCH" % det_age)
+                    rospy.logwarn("[IBVS] Lost target (%.1fs) -> SEARCH" % det_age)
                     self.reset_pid()
                     self.phase = "SEARCH"
                 elif det_age > self.stale_timeout:
@@ -374,9 +355,8 @@ class IBVSController:
                     err_x = abs((self.cx - self.img_cx) / self.img_cx - self.x_star)
                     err_y = abs((self.cy - self.img_cy) / self.img_cy - self.y_star)
                     err_a = abs(self.alpha - self.alpha_star)
-                    # HOLD entry err_a threshold rescaled with new alpha_star
                     if err_x < 0.12 and err_y < 0.12 and err_a < 0.005:
-                        rospy.loginfo("[IBVS] Centered → HOLD")
+                        rospy.loginfo("[IBVS] Centered -> HOLD")
                         self.phase = "HOLD"
                 elif self.is_prediction:
                     cmd_vx, cmd_vy, cmd_vz, cmd_wz = self.compute_velocities(
@@ -385,7 +365,7 @@ class IBVSController:
             elif self.phase == "HOLD":
                 det_age = self.time_since_detection()
                 if det_age > self.detection_timeout:
-                    rospy.logwarn("[IBVS] Lost in HOLD → APPROACH")
+                    rospy.logwarn("[IBVS] Lost in HOLD -> APPROACH")
                     self.reset_pid()
                     self.phase = "APPROACH"
                     self.recovery_start_time = rospy.Time.now()
@@ -413,16 +393,20 @@ class IBVSController:
                 err_x_v = (self.cx - self.img_cx) / self.img_cx - self.x_star
                 err_y_v = (self.cy - self.img_cy) / self.img_cy - self.y_star
                 err_a_v = self.alpha - self.alpha_star
+                ppo_str = ""
+                if self.ppo_is_active():
+                    ppo_str = " | PPO a*=%.4f lam=%.2f" % (self.alpha_star, self.lam)
                 rospy.loginfo_throttle(2,
-                    "[IBVS] %s%s | ex=%.3f ey=%.3f ea=%.4f α=%.4f pitch=%.1f° | "
-                    "vx=%.2f vy=%.2f vz=%.2f wz=%.2f | alt=%.1f det=%s"
+                    "[IBVS] %s%s | ex=%.3f ey=%.3f ea=%.4f a=%.4f pitch=%.1f | "
+                    "vx=%.2f vy=%.2f vz=%.2f wz=%.2f | alt=%.1f det=%s%s"
                     % (self.phase, " (REC)" if self.in_recovery() else "",
                        err_x_v, err_y_v, err_a_v, self.alpha,
                        math.degrees(self.current_pitch),
                        cmd_vx, cmd_vy, cmd_vz, cmd_wz,
                        self.altitude,
                        "REAL" if self.got_real_detection else
-                       "PRED" if self.is_prediction else "NONE"))
+                       "PRED" if self.is_prediction else "NONE",
+                       ppo_str))
 
             self.rate.sleep()
 

@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-analyze_flight_log.py — M7.3 dual-PX4 edition
-===============================================
+analyze_flight_log.py — M8 PPO-aware edition
+==============================================
+AI-Based Drone-to-Drone Detection and Tracking
+Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
-All original 11 sections preserved from M7.2.
-New sections 12-15 for dual-PX4 target data:
+All original sections 1-15 preserved.
+New sections 16-19 for PPO analysis:
 
-  12. Target position & velocity stats per phase
-  13. 3D distance (chaser-to-target) stats per phase
-  14. Chaser-vs-target altitude tracking
-  15. Tracking quality summary (one-line per-phase report)
+  16. PPO alpha_star stats per phase — shows how PPO adapts setpoint
+  17. PPO lambda stats per phase — shows controller trust modulation
+  18. PPO alpha_star vs actual alpha — is IBVS tracking the setpoint?
+  19. PPO response to target motion — does PPO react to fast targets?
 
-Backward-compatible: if target columns are missing (old CSV), sections 12-15 are skipped.
+Backward-compatible: if PPO columns missing, sections 16-19 skipped.
 
 Usage:
-  python3 analyze_flight_log.py                  # latest log
-  python3 analyze_flight_log.py --window 100 200 # rows 100-200 only
-  python3 analyze_flight_log.py --file path.csv  # specific file
+  python3 analyze_flight_log.py
+  python3 analyze_flight_log.py --window 100 200
+  python3 analyze_flight_log.py --file path.csv
 """
 
 import sys, os, argparse
@@ -53,8 +55,9 @@ def analyze(rows, label="full"):
     print("=== Flight log: %s ===" % label)
     print("Rows: %d    Duration: %.1f s    Effective rate: %.1f Hz" % (n, duration, rate))
 
-    # ── Check for target columns (M7.3) ───────────────────────────────
+    # ── Check for optional columns ────────────────────────────────────
     has_target = 'target_px' in rows[0] and 'dist_3d' in rows[0]
+    has_ppo = 'ppo_alpha_star' in rows[0] and 'ppo_lambda' in rows[0]
 
     # ── Parse arrays ──────────────────────────────────────────────────
     phases = [r['phase'] for r in rows]
@@ -72,6 +75,8 @@ def analyze(rows, label="full"):
     pos_y = np.array([to_float(r['pos_y']) for r in rows])
     pos_z = np.array([to_float(r['pos_z']) for r in rows])
     ea = np.array([to_float(r['ea']) for r in rows])
+    ex_arr = np.array([to_float(r['ex']) for r in rows])
+    ey_arr = np.array([to_float(r['ey']) for r in rows])
 
     if has_target:
         target_px = np.array([to_float(r['target_px']) for r in rows])
@@ -81,6 +86,10 @@ def analyze(rows, label="full"):
         target_cmd_vy = np.array([to_float(r['target_cmd_vy']) for r in rows])
         target_cmd_vz = np.array([to_float(r['target_cmd_vz']) for r in rows])
         dist_3d = np.array([to_float(r['dist_3d']) for r in rows])
+
+    if has_ppo:
+        ppo_alpha_star = np.array([to_float(r['ppo_alpha_star']) for r in rows])
+        ppo_lambda = np.array([to_float(r['ppo_lambda']) for r in rows])
 
     unique_phases = sorted(set(phases))
 
@@ -122,7 +131,6 @@ def analyze(rows, label="full"):
                   (name, len(vals), np.mean(vals), np.std(vals), np.min(vals),
                    np.percentile(vals, 5), np.median(vals),
                    np.percentile(vals, 95), np.max(vals)))
-        # filter-raw delta
         deltas = np.abs(flt_alpha[idx] - raw_alpha[idx])
         deltas = deltas[~np.isnan(deltas)]
         if len(deltas):
@@ -227,16 +235,16 @@ def analyze(rows, label="full"):
         ("err_a > +0.010 (very close)", lambda e: e > 0.010),
     ]
     print("  %-37s %5s %10s %10s %7s" % ("bin", "n", "mean_vx", "p50_vx", "wrong%"))
-    for label, cond in bins:
+    for label_bin, cond in bins:
         idx = [i for i in ah_real if cond(ea[i])]
         if not idx:
-            print("  %-37s %5d %10s" % (label, 0, "no data"))
+            print("  %-37s %5d %10s" % (label_bin, 0, "no data"))
             continue
         vx = cmd_vx[idx]
         wrong = sum(1 for i in idx if (ea[i] < -0.002 and cmd_vx[i] < -0.05) or
                     (ea[i] > 0.002 and cmd_vx[i] > 0.05))
         print("  %-37s %5d %10.4f %10.4f %6.1f%%" %
-              (label, len(idx), np.mean(vx), np.median(vx), 100*wrong/len(idx)))
+              (label_bin, len(idx), np.mean(vx), np.median(vx), 100*wrong/len(idx)))
 
     # ════════════════════════════════════════════════════════════════════
     # SECTION 8: Wrong-direction events
@@ -318,7 +326,6 @@ def analyze(rows, label="full"):
                 flag = "\u26A0 POOR TRACKING" if abs(err_m) > 0.02 else "\u2713 OK"
                 print("  %s:  n=%3d  mean_cmd=%+.3f  mean_actual=%+.3f  mean_err=%+.3f  %s" %
                       (axis, len(cmd_vals), cmd_m, act_m, err_m, flag))
-            # Origin drift
             tk_x = pos_x[tk_idx]
             tk_y = pos_y[tk_idx]
             drifts = np.sqrt((tk_x - tk_x[0])**2 + (tk_y - tk_y[0])**2)
@@ -326,118 +333,257 @@ def analyze(rows, label="full"):
                   (np.max(drifts), tk_x[-1] - tk_x[0], tk_y[-1] - tk_y[0]))
 
     # ════════════════════════════════════════════════════════════════════
-    # M7.3 SECTIONS — only if target columns exist
+    # M7.3 SECTIONS 12-15
     # ════════════════════════════════════════════════════════════════════
     if not has_target:
         print("\n=== 12-15. (skipped — no target columns in CSV) ===")
-        return
-
-    # Check if we actually have target data (not all NaN)
-    valid_target = ~np.isnan(target_px)
-    if np.sum(valid_target) < 5:
-        print("\n=== 12-15. (skipped — fewer than 5 rows with target data) ===")
-        return
-
-    # ════════════════════════════════════════════════════════════════════
-    # SECTION 12: Target position & velocity stats
-    # ════════════════════════════════════════════════════════════════════
-    print("\n=== 12. Target drone position & velocity stats per phase ===")
-    for ph in unique_phases:
-        idx = [i for i, p in enumerate(phases) if p == ph and valid_target[i]]
-        if not idx:
-            continue
-        print("-- %s (n=%d) --" % (ph, len(idx)))
-        tpx, tpy, tpz = target_px[idx], target_py[idx], target_pz[idx]
-        print("  target_pos     x: [%.1f, %.1f]  y: [%.1f, %.1f]  z: [%.1f, %.1f]" %
-              (np.min(tpx), np.max(tpx), np.min(tpy), np.max(tpy),
-               np.min(tpz), np.max(tpz)))
-
-        tvx = target_cmd_vx[idx]
-        tvy = target_cmd_vy[idx]
-        tvz = target_cmd_vz[idx]
-        # Only use rows where both vx and vy are valid
-        valid_v = ~np.isnan(tvx) & ~np.isnan(tvy)
-        if np.sum(valid_v) > 0:
-            h_speed = np.sqrt(tvx[valid_v]**2 + tvy[valid_v]**2)
-            print("  target_h_speed mean=%.2f  p50=%.2f  max=%.2f" %
-                  (np.mean(h_speed), np.median(h_speed), np.max(h_speed)))
-            tvz_valid = tvz[~np.isnan(tvz)]
-            if len(tvz_valid):
-                print("  target_vz      mean=%+.3f  std=%.3f  min=%+.3f  max=%+.3f" %
-                      (np.mean(tvz_valid), np.std(tvz_valid),
-                       np.min(tvz_valid), np.max(tvz_valid)))
-
-    # ════════════════════════════════════════════════════════════════════
-    # SECTION 13: 3D distance stats
-    # ════════════════════════════════════════════════════════════════════
-    print("\n=== 13. 3D chaser-to-target distance per phase ===")
-    for ph in unique_phases:
-        idx = [i for i, p in enumerate(phases) if p == ph and not np.isnan(dist_3d[i])]
-        if not idx:
-            continue
-        d = dist_3d[idx]
-        print("  %-12s n=%4d  mean=%.2fm  std=%.2f  min=%.2f  p5=%.2f  "
-              "p50=%.2f  p95=%.2f  max=%.2fm" %
-              (ph, len(d), np.mean(d), np.std(d), np.min(d),
-               np.percentile(d, 5), np.median(d),
-               np.percentile(d, 95), np.max(d)))
-
-    # ════════════════════════════════════════════════════════════════════
-    # SECTION 14: Altitude tracking (chaser vs target)
-    # ════════════════════════════════════════════════════════════════════
-    print("\n=== 14. Chaser-vs-target altitude tracking (HOLD phase) ===")
-    hold_idx = [i for i in range(n) if phases[i] == "HOLD" and valid_target[i]]
-    if len(hold_idx) > 5:
-        alt_err = pos_z[hold_idx] - target_pz[hold_idx]
-        print("  alt_err (chaser - target):  mean=%+.2fm  std=%.2f  "
-              "min=%+.2f  p5=%+.2f  p50=%+.2f  p95=%+.2f  max=%+.2fm" %
-              (np.mean(alt_err), np.std(alt_err), np.min(alt_err),
-               np.percentile(alt_err, 5), np.median(alt_err),
-               np.percentile(alt_err, 95), np.max(alt_err)))
-        # XY distance only (how well chaser follows horizontally)
-        xy_dist = np.sqrt((pos_x[hold_idx] - target_px[hold_idx])**2 +
-                          (pos_y[hold_idx] - target_py[hold_idx])**2)
-        print("  xy_dist:                    mean=%.2fm  std=%.2f  "
-              "p50=%.2f  p95=%.2f  max=%.2fm" %
-              (np.mean(xy_dist), np.std(xy_dist), np.median(xy_dist),
-               np.percentile(xy_dist, 95), np.max(xy_dist)))
     else:
-        print("  (insufficient HOLD frames with target data)")
+        valid_target = ~np.isnan(target_px)
+        if np.sum(valid_target) < 5:
+            print("\n=== 12-15. (skipped — fewer than 5 rows with target data) ===")
+        else:
+            # SECTION 12
+            print("\n=== 12. Target drone position & velocity stats per phase ===")
+            for ph in unique_phases:
+                idx = [i for i, p in enumerate(phases) if p == ph and valid_target[i]]
+                if not idx:
+                    continue
+                print("-- %s (n=%d) --" % (ph, len(idx)))
+                tpx, tpy, tpz = target_px[idx], target_py[idx], target_pz[idx]
+                print("  target_pos     x: [%.1f, %.1f]  y: [%.1f, %.1f]  z: [%.1f, %.1f]" %
+                      (np.min(tpx), np.max(tpx), np.min(tpy), np.max(tpy),
+                       np.min(tpz), np.max(tpz)))
+                tvx = target_cmd_vx[idx]
+                tvy = target_cmd_vy[idx]
+                tvz = target_cmd_vz[idx]
+                valid_v = ~np.isnan(tvx) & ~np.isnan(tvy)
+                if np.sum(valid_v) > 0:
+                    h_speed = np.sqrt(tvx[valid_v]**2 + tvy[valid_v]**2)
+                    print("  target_h_speed mean=%.2f  p50=%.2f  max=%.2f" %
+                          (np.mean(h_speed), np.median(h_speed), np.max(h_speed)))
+                    tvz_valid = tvz[~np.isnan(tvz)]
+                    if len(tvz_valid):
+                        print("  target_vz      mean=%+.3f  std=%.3f  min=%+.3f  max=%+.3f" %
+                              (np.mean(tvz_valid), np.std(tvz_valid),
+                               np.min(tvz_valid), np.max(tvz_valid)))
+
+            # SECTION 13
+            print("\n=== 13. 3D chaser-to-target distance per phase ===")
+            for ph in unique_phases:
+                idx = [i for i, p in enumerate(phases) if p == ph and not np.isnan(dist_3d[i])]
+                if not idx:
+                    continue
+                d = dist_3d[idx]
+                print("  %-12s n=%4d  mean=%.2fm  std=%.2f  min=%.2f  p5=%.2f  "
+                      "p50=%.2f  p95=%.2f  max=%.2fm" %
+                      (ph, len(d), np.mean(d), np.std(d), np.min(d),
+                       np.percentile(d, 5), np.median(d),
+                       np.percentile(d, 95), np.max(d)))
+
+            # SECTION 14
+            print("\n=== 14. Chaser-vs-target altitude tracking (HOLD phase) ===")
+            hold_idx = [i for i in range(n) if phases[i] == "HOLD" and valid_target[i]]
+            if len(hold_idx) > 5:
+                alt_err = pos_z[hold_idx] - target_pz[hold_idx]
+                print("  alt_err (chaser - target):  mean=%+.2fm  std=%.2f  "
+                      "min=%+.2f  p5=%+.2f  p50=%+.2f  p95=%+.2f  max=%+.2fm" %
+                      (np.mean(alt_err), np.std(alt_err), np.min(alt_err),
+                       np.percentile(alt_err, 5), np.median(alt_err),
+                       np.percentile(alt_err, 95), np.max(alt_err)))
+                xy_dist = np.sqrt((pos_x[hold_idx] - target_px[hold_idx])**2 +
+                                  (pos_y[hold_idx] - target_py[hold_idx])**2)
+                print("  xy_dist:                    mean=%.2fm  std=%.2f  "
+                      "p50=%.2f  p95=%.2f  max=%.2fm" %
+                      (np.mean(xy_dist), np.std(xy_dist), np.median(xy_dist),
+                       np.percentile(xy_dist, 95), np.max(xy_dist)))
+            else:
+                print("  (insufficient HOLD frames with target data)")
+
+            # SECTION 15
+            print("\n=== 15. Tracking quality summary ===")
+            total_time = duration
+            hold_rows = [i for i in range(n) if phases[i] == "HOLD"]
+            hold_time = len(hold_rows) / rate if rate > 0 else 0
+            search_rows = [i for i in range(n) if phases[i] == "SEARCH"]
+            search_time = len(search_rows) / rate if rate > 0 else 0
+            det_real = sum(1 for i in hold_rows if raw_det[i] == "REAL")
+            det_pct = 100 * det_real / len(hold_rows) if hold_rows else 0
+
+            hold_dist_idx = [i for i in hold_rows if not np.isnan(dist_3d[i])]
+            mean_dist = np.mean(dist_3d[hold_dist_idx]) if hold_dist_idx else float('nan')
+
+            hold_alpha_idx = [i for i in hold_rows if raw_det[i] == "REAL"]
+            mean_alpha = np.mean(flt_alpha[hold_alpha_idx]) if hold_alpha_idx else float('nan')
+
+            print("  Flight duration:          %.1f s" % total_time)
+            print("  HOLD time:                %.1f s (%.0f%%)" %
+                  (hold_time, 100*hold_time/total_time if total_time > 0 else 0))
+            print("  SEARCH time:              %.1f s (%.0f%%)" %
+                  (search_time, 100*search_time/total_time if total_time > 0 else 0))
+            print("  Detection rate (HOLD):    %.1f%%" % det_pct)
+            print("  Mean 3D distance (HOLD):  %.2f m" % mean_dist)
+            print("  Mean alpha (HOLD):        %.5f (target=%.5f)" % (mean_alpha, ALPHA_STAR))
+            if hold_dist_idx:
+                d = dist_3d[hold_dist_idx]
+                close = sum(1 for v in d if v < 2.0)
+                far = sum(1 for v in d if v > 8.0)
+                print("  Distance < 2m:            %d frames (%.1f%%)" %
+                      (close, 100*close/len(d)))
+                print("  Distance > 8m:            %d frames (%.1f%%)" %
+                      (far, 100*far/len(d)))
 
     # ════════════════════════════════════════════════════════════════════
-    # SECTION 15: Tracking quality summary
+    # M8 SECTIONS 16-19 — PPO analysis
     # ════════════════════════════════════════════════════════════════════
-    print("\n=== 15. Tracking quality summary ===")
-    total_time = duration
-    hold_rows = [i for i in range(n) if phases[i] == "HOLD"]
-    hold_time = len(hold_rows) / rate if rate > 0 else 0
-    search_rows = [i for i in range(n) if phases[i] == "SEARCH"]
-    search_time = len(search_rows) / rate if rate > 0 else 0
-    det_real = sum(1 for i in hold_rows if raw_det[i] == "REAL")
-    det_pct = 100 * det_real / len(hold_rows) if hold_rows else 0
+    if not has_ppo:
+        print("\n=== 16-19. (skipped — no PPO columns in CSV) ===")
+        return
 
-    hold_dist_idx = [i for i in hold_rows if not np.isnan(dist_3d[i])]
-    mean_dist = np.mean(dist_3d[hold_dist_idx]) if hold_dist_idx else float('nan')
+    valid_ppo = ~np.isnan(ppo_alpha_star)
+    if np.sum(valid_ppo) < 5:
+        print("\n=== 16-19. (skipped — fewer than 5 rows with PPO data) ===")
+        return
 
-    hold_alpha_idx = [i for i in hold_rows if raw_det[i] == "REAL"]
-    mean_alpha = np.mean(flt_alpha[hold_alpha_idx]) if hold_alpha_idx else float('nan')
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 16: PPO alpha_star stats per phase
+    # ════════════════════════════════════════════════════════════════════
+    print("\n=== 16. PPO alpha_star stats per phase ===")
+    print("  Expected: far → high alpha* (approach), hold → ~0.007, close → low alpha* (retreat)")
+    for ph in unique_phases:
+        idx = [i for i, p in enumerate(phases) if p == ph and valid_ppo[i]]
+        if not idx:
+            continue
+        vals = ppo_alpha_star[idx]
+        vals = vals[~np.isnan(vals)]
+        if len(vals) == 0:
+            continue
+        print("  %-12s n=%4d  mean=%.5f  std=%.5f  min=%.5f  p5=%.5f  "
+              "p50=%.5f  p95=%.5f  max=%.5f" %
+              (ph, len(vals), np.mean(vals), np.std(vals), np.min(vals),
+               np.percentile(vals, 5), np.median(vals),
+               np.percentile(vals, 95), np.max(vals)))
 
-    print("  Flight duration:          %.1f s" % total_time)
-    print("  HOLD time:                %.1f s (%.0f%%)" %
-          (hold_time, 100*hold_time/total_time if total_time > 0 else 0))
-    print("  SEARCH time:              %.1f s (%.0f%%)" %
-          (search_time, 100*search_time/total_time if total_time > 0 else 0))
-    print("  Detection rate (HOLD):    %.1f%%" % det_pct)
-    print("  Mean 3D distance (HOLD):  %.2f m" % mean_dist)
-    print("  Mean alpha (HOLD):        %.5f (target=%.5f)" % (mean_alpha, ALPHA_STAR))
-    if hold_dist_idx:
-        d = dist_3d[hold_dist_idx]
-        close = sum(1 for v in d if v < 2.0)
-        far = sum(1 for v in d if v > 8.0)
-        print("  Distance < 2m:            %d frames (%.1f%%)" %
-              (close, 100*close/len(d)))
-        print("  Distance > 8m:            %d frames (%.1f%%)" %
-              (far, 100*far/len(d)))
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 17: PPO lambda stats per phase
+    # ════════════════════════════════════════════════════════════════════
+    print("\n=== 17. PPO lambda stats per phase ===")
+    print("  Expected: moderate at hold (~0.3-0.5), increases during maneuvers")
+    for ph in unique_phases:
+        idx = [i for i, p in enumerate(phases) if p == ph and valid_ppo[i]]
+        if not idx:
+            continue
+        vals = ppo_lambda[idx]
+        vals = vals[~np.isnan(vals)]
+        if len(vals) == 0:
+            continue
+        print("  %-12s n=%4d  mean=%.3f  std=%.3f  min=%.3f  p5=%.3f  "
+              "p50=%.3f  p95=%.3f  max=%.3f" %
+              (ph, len(vals), np.mean(vals), np.std(vals), np.min(vals),
+               np.percentile(vals, 5), np.median(vals),
+               np.percentile(vals, 95), np.max(vals)))
+
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 18: PPO alpha_star vs actual alpha — tracking accuracy
+    # ════════════════════════════════════════════════════════════════════
+    print("\n=== 18. PPO alpha_star vs actual alpha (APPROACH+HOLD, REAL) ===")
+    print("  Shows how well IBVS tracks the PPO setpoint")
+    ah_ppo = [i for i in range(n) if phases[i] in ("APPROACH", "HOLD")
+              and flt_det[i] == "REAL" and valid_ppo[i]]
+    if len(ah_ppo) > 5:
+        err_setpoint = flt_alpha[ah_ppo] - ppo_alpha_star[ah_ppo]
+        err_setpoint = err_setpoint[~np.isnan(err_setpoint)]
+        if len(err_setpoint) > 0:
+            print("  err (alpha - alpha*):  n=%d  mean=%+.5f  std=%.5f  "
+                  "min=%+.5f  p5=%+.5f  p50=%+.5f  p95=%+.5f  max=%+.5f" %
+                  (len(err_setpoint), np.mean(err_setpoint), np.std(err_setpoint),
+                   np.min(err_setpoint), np.percentile(err_setpoint, 5),
+                   np.median(err_setpoint), np.percentile(err_setpoint, 95),
+                   np.max(err_setpoint)))
+            # Bin by distance regime
+            alpha_bins = [
+                ("alpha < 0.004 (far)",  lambda a: a < 0.004),
+                ("0.004-0.008 (approach)", lambda a: 0.004 <= a < 0.008),
+                ("0.005-0.010 (hold)",   lambda a: 0.005 <= a < 0.010),
+                ("alpha > 0.010 (close)", lambda a: a > 0.010),
+            ]
+            for lbl, cond in alpha_bins:
+                sub = [i for i in ah_ppo if cond(flt_alpha[i]) and not np.isnan(ppo_alpha_star[i])]
+                if len(sub) < 3:
+                    continue
+                mean_alpha = np.mean(flt_alpha[sub])
+                mean_astar = np.mean(ppo_alpha_star[sub])
+                mean_lam = np.mean(ppo_lambda[sub])
+                print("    %-25s n=%4d  mean_alpha=%.5f  mean_alpha*=%.5f  "
+                      "mean_lambda=%.3f" %
+                      (lbl, len(sub), mean_alpha, mean_astar, mean_lam))
+    else:
+        print("  (insufficient APPROACH/HOLD frames with PPO data)")
+
+    # ════════════════════════════════════════════════════════════════════
+    # SECTION 19: PPO response to target motion
+    # ════════════════════════════════════════════════════════════════════
+    print("\n=== 19. PPO response to target motion ===")
+    print("  Expected: faster targets → higher alpha* and lambda")
+    if has_target:
+        hold_ppo_target = [i for i in range(n)
+                           if phases[i] == "HOLD"
+                           and valid_ppo[i]
+                           and not np.isnan(target_cmd_vx[i])
+                           and not np.isnan(target_cmd_vy[i])]
+        if len(hold_ppo_target) > 10:
+            t_speeds = np.sqrt(target_cmd_vx[hold_ppo_target]**2 +
+                               target_cmd_vy[hold_ppo_target]**2)
+            speed_bins = [
+                ("static (< 0.1 m/s)",    lambda s: s < 0.1),
+                ("slow (0.1-0.3 m/s)",     lambda s: 0.1 <= s < 0.3),
+                ("moderate (0.3-0.5 m/s)", lambda s: 0.3 <= s < 0.5),
+                ("fast (> 0.5 m/s)",       lambda s: s >= 0.5),
+            ]
+            print("  %-28s %5s %12s %10s" % ("target speed", "n", "mean_alpha*", "mean_lambda"))
+            for lbl, cond in speed_bins:
+                sub_mask = np.array([cond(s) for s in t_speeds])
+                sub_idx = np.array(hold_ppo_target)[sub_mask]
+                if len(sub_idx) < 3:
+                    print("  %-28s %5d %12s" % (lbl, len(sub_idx), "no data"))
+                    continue
+                mean_astar = np.mean(ppo_alpha_star[sub_idx])
+                mean_lam = np.mean(ppo_lambda[sub_idx])
+                print("  %-28s %5d %12.5f %10.3f" %
+                      (lbl, len(sub_idx), mean_astar, mean_lam))
+        else:
+            print("  (insufficient HOLD frames with PPO + target data)")
+    else:
+        print("  (no target columns — cannot correlate PPO with target speed)")
+
+    # ════════════════════════════════════════════════════════════════════
+    # PPO SUMMARY
+    # ════════════════════════════════════════════════════════════════════
+    print("\n=== PPO Summary ===")
+    hold_ppo = [i for i in range(n) if phases[i] == "HOLD" and valid_ppo[i]]
+    if hold_ppo:
+        mean_as = np.mean(ppo_alpha_star[hold_ppo])
+        std_as = np.std(ppo_alpha_star[hold_ppo])
+        mean_lm = np.mean(ppo_lambda[hold_ppo])
+        std_lm = np.std(ppo_lambda[hold_ppo])
+        print("  HOLD: alpha*=%.5f +/- %.5f  lambda=%.3f +/- %.3f" %
+              (mean_as, std_as, mean_lm, std_lm))
+
+        # Variance check
+        if std_as < 0.0005:
+            print("  \u26A0 alpha_star has very low variance — PPO may be outputting constant")
+        else:
+            print("  \u2713 alpha_star shows variation (std=%.5f)" % std_as)
+
+        if std_lm < 0.01:
+            print("  \u26A0 lambda has very low variance — PPO may be outputting constant")
+        else:
+            print("  \u2713 lambda shows variation (std=%.3f)" % std_lm)
+
+        # Range check
+        if mean_as < 0.003 or mean_as > 0.020:
+            print("  \u26A0 mean alpha* (%.5f) outside expected range [0.003, 0.020]" % mean_as)
+        else:
+            print("  \u2713 mean alpha* (%.5f) in expected range" % mean_as)
 
 
 def main():

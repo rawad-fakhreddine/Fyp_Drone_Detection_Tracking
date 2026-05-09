@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-ppo_agent_node.py — PPO v4.5 Agent (normalized observations)
-==============================================================
+ppo_agent_node.py — PPO v5.1 Agent (6D observations, calibrated physics)
+=========================================================================
 AI-Based Drone-to-Drone Detection and Tracking
-Rawad Fakhredine | FYP Masters in Robotics
+Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
-Matches PPO v4.5 training with NORMALIZED observations:
-  - Network input: [ex, ey, alpha_real / 0.06]
-  - Network output: [alpha_norm, lambda_norm] clipped to [-1, 1]
-  - Rescaled to [0, 1] then decoded to alpha* and lambda
+v5.1 changes from v4.5:
+  - 6D observations: [ex, ey, alpha_norm, d_ex*10, d_ey*10, d_alpha_norm*100]
+  - Rate computation via finite differences at 20Hz
+  - Rate amplification: d_ex*10, d_ey*10, d_alpha_norm*100
+  - Alpha range: [0.003, 0.020] (was [0.005, 0.040])
+  - Weights: ppo_policy_weights_v5.pth
 
-Subscribes: /drone_tracking/filtered_target  (geometry_msgs/Point from Kalman)
-Publishes:  /drone_tracking/ibvs_setpoints   (geometry_msgs/Quaternion: x=x*, y=y*, z=alpha*, w=lambda)
+Subscribes: /drone_tracking/filtered_target  (Point: x=cx, y=cy, z=±area_px)
+Publishes:  /drone_tracking/ibvs_setpoints   (Quaternion: x=0, y=0, z=alpha*, w=lambda)
 """
 
 import rospy
@@ -22,12 +24,8 @@ from geometry_msgs.msg import Point, Quaternion
 
 
 class PPOPolicyNetwork(nn.Module):
-    """
-    SB3 MlpPolicy actor reconstruction.
-    Architecture: 3 → 256 → 256 → 2, Tanh activations.
-    (Matches v4.5 training with net_arch=[256, 256])
-    """
-    def __init__(self, obs_dim=3, act_dim=2, net_arch=[256, 256]):
+    """SB3 MlpPolicy actor: 6 → 256 → 256 → 2, Tanh."""
+    def __init__(self, obs_dim=6, act_dim=2, net_arch=[256, 256]):
         super().__init__()
         layers = []
         prev_dim = obs_dim
@@ -44,25 +42,31 @@ class PPOPolicyNetwork(nn.Module):
 
 
 class PPOAgentNode:
-    ALPHA_MIN_REAL = 0.005
-    ALPHA_MAX_REAL = 0.040
+    # Must match training env exactly
+    ALPHA_MIN_REAL = 0.003
+    ALPHA_MAX_REAL = 0.020
     ALPHA_OBS_MAX  = 0.060
+
+    # Rate amplification — must match training
+    D_EX_SCALE    = 10.0
+    D_EY_SCALE    = 10.0
+    D_ALPHA_SCALE = 100.0
 
     def __init__(self):
         rospy.init_node('ppo_agent_node', anonymous=True)
 
         weights_path = rospy.get_param(
             '~weights_path',
-            '/home/rawad/drone_detection/models/ppo_policy_weights_v4.pth')
+            '/home/rawad/drone_detection/models/ppo_policy_weights_v5.pth')
 
-        rospy.loginfo(f"PPO Agent v4.5 — Loading weights from {weights_path}")
+        rospy.loginfo("PPO Agent v5.1 — Loading weights from %s" % weights_path)
 
         self.device = torch.device('cpu')
-        self.policy = PPOPolicyNetwork(obs_dim=3, act_dim=2, net_arch=[256, 256])
+        self.policy = PPOPolicyNetwork(obs_dim=6, act_dim=2, net_arch=[256, 256])
 
-        state_dict = torch.load(weights_path, map_location=self.device, weights_only=True)
+        state_dict = torch.load(weights_path, map_location=self.device,
+                                weights_only=True)
 
-        # Map SB3 keys → our network keys
         mapped_dict = {}
         for key, value in state_dict.items():
             if 'mlp_extractor.policy_net' in key:
@@ -73,48 +77,65 @@ class PPOAgentNode:
 
         self.policy.load_state_dict(mapped_dict, strict=False)
         self.policy.eval()
-        rospy.loginfo("✓ PPO v4.5 policy loaded (normalized obs, [256,256] net)")
+        rospy.loginfo("PPO v5.1 policy loaded (6D obs, [256,256], "
+                      "alpha [%.3f, %.3f])" %
+                      (self.ALPHA_MIN_REAL, self.ALPHA_MAX_REAL))
 
-        # Publish Quaternion on /drone_tracking/ibvs_setpoints (matches IBVS subscriber)
+        # Previous state for rate computation
+        self.prev_ex = None
+        self.prev_ey = None
+        self.prev_alpha_norm = None
+        self.prev_time = None
+
         self.pub = rospy.Publisher(
             '/drone_tracking/ibvs_setpoints',
             Quaternion, queue_size=1)
 
-        # Subscribe to Kalman filter output (geometry_msgs/Point)
         self.sub = rospy.Subscriber(
             '/drone_tracking/filtered_target',
             Point, self.callback, queue_size=1)
 
-        rospy.loginfo("PPO Agent v4.5 running — waiting for filtered_target...")
+        rospy.loginfo("PPO Agent v5.1 running — waiting for filtered_target...")
 
     def callback(self, msg):
-        # msg is geometry_msgs/Point — access fields directly
-        # Kalman publishes absolute pixel cx/cy in x/y, and bbox AREA in z
-        # We need to convert cx/cy → normalized errors, and area → alpha
-        img_w, img_h = 640.0, 480.0
-        img_cx, img_cy = img_w / 2.0, img_h / 2.0
-        area_norm = img_w * img_h  # 307200
-
-        # If z is NaN or non-positive-with-NaN, skip
         if np.isnan(msg.x) or np.isnan(msg.y) or np.isnan(msg.z):
             return
 
-        # Normalize pixel error to [-1, 1]
+        img_w, img_h = 640.0, 480.0
+        img_cx, img_cy = img_w / 2.0, img_h / 2.0
+        area_norm = img_w * img_h
+
         ex = (msg.x - img_cx) / img_cx
         ey = (msg.y - img_cy) / img_cy
-
-        # Kalman z convention: z > 0 = real detection (bbox area in pixels)
-        #                     z < 0 = prediction (negative bbox area)
-        # Use absolute value to get alpha regardless of prediction flag
         alpha = abs(msg.z) / area_norm
+        alpha_norm = alpha / self.ALPHA_OBS_MAX
 
-        # NORMALIZE alpha to match training observation space
-        alpha_norm_obs = alpha / self.ALPHA_OBS_MAX  # → [0, 1]
+        now = rospy.Time.now().to_sec()
+
+        # Rate computation via finite differences
+        if self.prev_ex is not None and self.prev_time is not None:
+            dt = now - self.prev_time
+            if 0.01 < dt < 0.5:
+                d_ex = (ex - self.prev_ex) / (dt * 20.0)
+                d_ey = (ey - self.prev_ey) / (dt * 20.0)
+                d_alpha_norm = (alpha_norm - self.prev_alpha_norm) / (dt * 20.0)
+            else:
+                d_ex = d_ey = d_alpha_norm = 0.0
+        else:
+            d_ex = d_ey = d_alpha_norm = 0.0
+
+        self.prev_ex = ex
+        self.prev_ey = ey
+        self.prev_alpha_norm = alpha_norm
+        self.prev_time = now
 
         obs = np.array([
-            np.clip(ex,              -1.0, 1.0),
-            np.clip(ey,              -1.0, 1.0),
-            np.clip(alpha_norm_obs,   0.0, 1.0),
+            np.clip(ex, -1.0, 1.0),
+            np.clip(ey, -1.0, 1.0),
+            np.clip(alpha_norm, 0.0, 1.0),
+            np.clip(d_ex * self.D_EX_SCALE, -1.0, 1.0),
+            np.clip(d_ey * self.D_EY_SCALE, -1.0, 1.0),
+            np.clip(d_alpha_norm * self.D_ALPHA_SCALE, -1.0, 1.0),
         ], dtype=np.float32)
 
         obs_tensor = torch.from_numpy(obs).unsqueeze(0)
@@ -122,23 +143,16 @@ class PPOAgentNode:
         with torch.no_grad():
             action_raw = self.policy(obs_tensor).squeeze(0).numpy()
 
-        # Clip to [-1, 1] and rescale to [0, 1]
         action_clipped = np.clip(action_raw, -1.0, 1.0)
         action_01 = (action_clipped + 1.0) / 2.0
 
-        # Decode
-        alpha_norm_out = action_01[0]
-        lam            = float(action_01[1])
-        alpha_star = self.ALPHA_MIN_REAL + alpha_norm_out * (self.ALPHA_MAX_REAL - self.ALPHA_MIN_REAL)
+        alpha_star = self.ALPHA_MIN_REAL + action_01[0] * \
+                     (self.ALPHA_MAX_REAL - self.ALPHA_MIN_REAL)
+        lam = float(action_01[1])
 
-        # x* and y* fixed at 0 (IBVS handles centering)
-        x_star = 0.0
-        y_star = 0.0
-
-        # Publish as Quaternion: x=x*, y=y*, z=alpha*, w=lambda
         out = Quaternion()
-        out.x = float(x_star)
-        out.y = float(y_star)
+        out.x = 0.0
+        out.y = 0.0
         out.z = float(alpha_star)
         out.w = float(lam)
         self.pub.publish(out)

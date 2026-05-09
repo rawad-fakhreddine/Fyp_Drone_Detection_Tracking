@@ -1,30 +1,23 @@
 #!/usr/bin/env python3
 """
-flight_logger.py — 4 Hz CSV logger (M7.3 dual-PX4 edition)
-============================================================
+flight_logger.py — M8 PPO-aware logger (4 Hz)
+===============================================
+AI-Based Drone-to-Drone Detection and Tracking
+Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
-Logs both chaser and target drone data in a single CSV.
+M8 additions:
+  - Subscribes to /drone_tracking/ibvs_setpoints (Quaternion) for PPO outputs
+  - New columns: ppo_alpha_star, ppo_lambda
+  - Backward-compatible: columns fill with NaN if PPO is off
 
-M7.3 additions:
-  - Subscribes to /target/mavros/local_position/pose for target position
-  - Subscribes to /target/mavros/setpoint_raw/local for target velocity commands
-  - New columns: target_px, target_py, target_pz,
-                  target_cmd_vx, target_cmd_vy, target_cmd_vz, target_cmd_wz,
-                  dist_3d (Euclidean chaser-to-target distance)
-  - Backward-compatible: if target topics are absent, columns fill with NaN
-
-Carried from M7.2:
-  - Subscribes to /mavros/setpoint_raw/local (PositionTarget) for chaser commands
-  - cmd_frame column (1=LOCAL_NED, 8=BODY_NED)
-  - target_alpha = 0.0067 (matches IBVS v6.13+)
-  - 4 Hz logging rate
+All M7.3 columns preserved (chaser, target, dist_3d).
 
 Output: ~/flight_log_latest.csv
 """
 
 import rospy, math, csv, os
 import numpy as np
-from geometry_msgs.msg import PoseStamped, Point
+from geometry_msgs.msg import PoseStamped, Point, Quaternion
 from mavros_msgs.msg import State, PositionTarget
 from std_msgs.msg import String
 
@@ -33,7 +26,7 @@ class FlightLogger:
     def __init__(self):
         rospy.init_node('flight_logger')
 
-        # ── Chaser state ──────────────────────────────────────────────────
+        # ── Chaser state ──────────────────────────────────────────────
         self.pos_x = self.pos_y = self.pos_z = 0.0
         self.roll = self.pitch = self.yaw = 0.0
         self.cmd_vx = self.cmd_vy = self.cmd_vz = self.cmd_wz = 0.0
@@ -41,7 +34,7 @@ class FlightLogger:
         self.phase = "UNKNOWN"
         self.armed = False
 
-        # ── Target state (M7.3) ───────────────────────────────────────────
+        # ── Target state (M7.3) ──────────────────────────────────────
         self.target_px = float('nan')
         self.target_py = float('nan')
         self.target_pz = float('nan')
@@ -52,23 +45,28 @@ class FlightLogger:
         self.got_target_pose = False
         self.got_target_cmd = False
 
-        # ── RAW YOLO ──────────────────────────────────────────────────────
+        # ── RAW YOLO ─────────────────────────────────────────────────
         self.raw_cx = self.raw_cy = 0.0
         self.raw_alpha_pix = 0.0
         self.raw_det = "NONE"
 
-        # ── FILTERED Kalman ───────────────────────────────────────────────
+        # ── FILTERED Kalman ──────────────────────────────────────────
         self.flt_cx = self.flt_cy = 0.0
         self.flt_alpha_pix = 0.0
         self.flt_det = "NONE"
 
-        # ── Image / target params ─────────────────────────────────────────
+        # ── PPO outputs (M8) ─────────────────────────────────────────
+        self.ppo_alpha_star = float('nan')
+        self.ppo_lambda = float('nan')
+        self.got_ppo = False
+
+        # ── Image / target params ────────────────────────────────────
         self.img_cx = 320.0
         self.img_cy = 240.0
         self.area_norm = 640.0 * 480.0
-        self.target_alpha = 0.0067  # IBVS v6.13+
+        self.target_alpha = 0.0067
 
-        # ── CSV ───────────────────────────────────────────────────────────
+        # ── CSV ──────────────────────────────────────────────────────
         self.csv_path = os.path.expanduser("~/flight_log_latest.csv")
         self.csv_file = open(self.csv_path, 'w', newline='')
         self.writer = csv.writer(self.csv_file)
@@ -80,13 +78,15 @@ class FlightLogger:
             'raw_cx', 'raw_cy', 'raw_alpha', 'raw_det',
             'flt_cx', 'flt_cy', 'flt_alpha', 'flt_det',
             'alpha_delta', 'ex', 'ey', 'ea',
-            # M7.3 new columns
+            # M7.3 target columns
             'target_px', 'target_py', 'target_pz',
             'target_cmd_vx', 'target_cmd_vy', 'target_cmd_vz', 'target_cmd_wz',
             'dist_3d',
+            # M8 PPO columns
+            'ppo_alpha_star', 'ppo_lambda',
         ])
 
-        # ── Chaser subscribers ────────────────────────────────────────────
+        # ── Chaser subscribers ───────────────────────────────────────
         rospy.Subscriber('/mavros/local_position/pose', PoseStamped,
                          self.pose_cb, queue_size=1)
         rospy.Subscriber('/mavros/setpoint_raw/local', PositionTarget,
@@ -99,21 +99,25 @@ class FlightLogger:
         rospy.Subscriber('/drone_tracking/filtered_target', Point,
                          self.flt_cb, queue_size=1)
 
-        # ── Target subscribers (M7.3) ─────────────────────────────────────
+        # ── Target subscribers (M7.3) ────────────────────────────────
         rospy.Subscriber('/target/mavros/local_position/pose', PoseStamped,
                          self.target_pose_cb, queue_size=1)
         rospy.Subscriber('/target/mavros/setpoint_raw/local', PositionTarget,
                          self.target_cmd_cb, queue_size=1)
 
+        # ── PPO subscriber (M8) ─────────────────────────────────────
+        rospy.Subscriber('/drone_tracking/ibvs_setpoints', Quaternion,
+                         self.ppo_cb, queue_size=1)
+
         self.rate = rospy.Rate(4)
 
-        rospy.loginfo("[FlightLogger] M7.3 dual-PX4 logger started (4 Hz)")
+        rospy.loginfo("[FlightLogger] M8 PPO-aware logger started (4 Hz)")
         rospy.loginfo("[FlightLogger] CSV: %s" % self.csv_path)
         rospy.loginfo("[FlightLogger] target_alpha=%.4f" % self.target_alpha)
 
         self.run()
 
-    # ── Chaser callbacks ──────────────────────────────────────────────────
+    # ── Chaser callbacks ─────────────────────────────────────────────
 
     def pose_cb(self, msg):
         self.pos_x = msg.pose.position.x
@@ -165,7 +169,7 @@ class FlightLogger:
         else:
             self.flt_det = "NONE"
 
-    # ── Target callbacks (M7.3) ───────────────────────────────────────────
+    # ── Target callbacks (M7.3) ──────────────────────────────────────
 
     def target_pose_cb(self, msg):
         self.target_px = msg.pose.position.x
@@ -180,7 +184,14 @@ class FlightLogger:
         self.target_cmd_wz = msg.yaw_rate
         self.got_target_cmd = True
 
-    # ── Main loop ─────────────────────────────────────────────────────────
+    # ── PPO callback (M8) ────────────────────────────────────────────
+
+    def ppo_cb(self, msg):
+        self.ppo_alpha_star = msg.z
+        self.ppo_lambda = msg.w
+        self.got_ppo = True
+
+    # ── Main loop ────────────────────────────────────────────────────
 
     def run(self):
         while not rospy.is_shutdown():
@@ -194,7 +205,6 @@ class FlightLogger:
             ey = (self.flt_cy - self.img_cy) / self.img_cy if self.flt_det != "NONE" else 0.0
             ea = flt_alpha - self.target_alpha if self.flt_det != "NONE" else 0.0
 
-            # Compute 3D distance (M7.3)
             if self.got_target_pose:
                 dx = self.pos_x - self.target_px
                 dy = self.pos_y - self.target_py
@@ -227,6 +237,9 @@ class FlightLogger:
                 '%.3f' % self.target_cmd_vz if self.got_target_cmd else '',
                 '%.3f' % self.target_cmd_wz if self.got_target_cmd else '',
                 '%.2f' % dist_3d if not math.isnan(dist_3d) else '',
+                # M8 PPO columns
+                '%.5f' % self.ppo_alpha_star if self.got_ppo else '',
+                '%.3f' % self.ppo_lambda if self.got_ppo else '',
             ])
             self.csv_file.flush()
 
