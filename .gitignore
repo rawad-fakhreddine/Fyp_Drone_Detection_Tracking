@@ -2,3 +2,15 @@ __pycache__/
 *.pyc
 .catkin_workspace
 CMakeLists.txt
+*.pt
+*.pth
+*.zip
+*.jpg
+*.jpeg
+*.png
+__pycache__/
+*.pyc
+capture*/
+v3_*/
+v4_*/
+flight_log*.csv
