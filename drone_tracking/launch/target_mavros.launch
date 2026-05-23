@@ -1,0 +1,9 @@
+<launch>
+    <group ns="target">
+        <include file="$(find mavros)/launch/px4.launch">
+            <arg name="fcu_url" value="udp://:14541@127.0.0.1:14581"/>
+            <arg name="tgt_system" value="2"/>
+            <arg name="tgt_component" value="1"/>
+        </include>
+    </group>
+</launch>

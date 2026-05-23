@@ -1,0 +1,18 @@
+# Data — never commit (stays in ~/drone_detection/)
+*.jpg
+*.jpeg
+*.png
+*.pt
+*.pth
+*.zip
+*.csv
+capture*/
+v4_*/
+v3_*/
+models/
+flight_log*.csv
+__pycache__/
+*.pyc
+.catkin_workspace
+build/
+devel/
