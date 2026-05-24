@@ -43,14 +43,14 @@ LOCAL_VEL_MASK = (
     PositionTarget.IGNORE_YAW
 )
 
-TAKEOFF_ALT   = 7.0    # v9.6: was 1.5 — matches target RISE_TO_Z=8m
-ALT_TOLERANCE = 0.40   # v9.6: was 0.25 — slightly wider band at 7m
+TAKEOFF_ALT   = 12.0    # v9.6: was 1.5 — matches target RISE_TO_Z=8m
+ALT_TOLERANCE = 0.50   # v9.6: was 0.25 — slightly wider band at 7m
 CALM_DURATION = 2.0
 RAMP_DURATION = 1.5
 MAX_CLIMB     = 0.8    # v9.6: was 0.6 — faster climb to reach 7m
 XY_P_GAIN     = 0.6
 HOVER_HOLD_S  = 5.0    # v9.8: was 3.0 — longer altitude convergence
-CLIMB_TIMEOUT = 60.0   # v9.6: was 30.0 — extended for 7m climb
+CLIMB_TIMEOUT = 120.0   # v9.6: was 30.0 — extended for 7m climb
 
 
 class DroneHandle:

@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 """
-flight_logger.py — M8.2 Fuzzy-aware logger (4 Hz)
-===================================================
+flight_logger.py — M9.3
+========================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
-M8.2 additions:
-  - Subscribes to /drone_tracking/target_fuzzy_state (Float32MultiArray)
-    for 7 fuzzy debug values: d, d_dot, phi, perturb_deg, speed, omega, vz
-  - Subscribes to /gazebo/model_states for TRUE world-frame dist_3d
-    (fixes the broken cross-frame MAVROS distance from M7.3)
-  - New columns: true_dist_3d, fuzzy_d, fuzzy_ddot, fuzzy_phi,
-                 fuzzy_perturb_deg, fuzzy_speed, fuzzy_omega, fuzzy_vz
+M9.3 addition (on top of M8.2):
+  - world_alt_err = chaser_wz - target_wz  (Gazebo world frame)
+    Replaces the broken cross-frame MAVROS alt_err (pos_z - target_pz)
+    which had a +0.5m spawn-offset bias.
 
-M8 columns preserved: ppo_alpha_star, ppo_lambda
-All M7.3 columns preserved (backward-compatible with old CSVs).
-
+All previous columns preserved (backward-compatible).
 Output: ~/flight_log_latest.csv
 """
 
@@ -50,7 +45,7 @@ class FlightLogger:
         self.got_target_pose = False
         self.got_target_cmd  = False
 
-        # ── Gazebo world positions (M8.2) — true dist_3d ─────────────
+        # ── Gazebo world positions (M8.2) ─────────────────────────────
         self.chaser_wx = float('nan')
         self.chaser_wy = float('nan')
         self.chaser_wz = float('nan')
@@ -75,7 +70,6 @@ class FlightLogger:
         self.got_ppo = False
 
         # ── Fuzzy state (M8.2) ────────────────────────────────────────
-        # [d, d_dot, phi, perturb_deg, f_speed, f_omega, f_vz]
         self.fuzzy_d           = float('nan')
         self.fuzzy_ddot        = float('nan')
         self.fuzzy_phi         = float('nan')
@@ -85,10 +79,10 @@ class FlightLogger:
         self.fuzzy_vz          = float('nan')
         self.got_fuzzy = False
 
-        # ── Image / target params ────────────────────────────────────
-        self.img_cx      = 320.0
-        self.img_cy      = 240.0
-        self.area_norm   = 640.0 * 480.0
+        # ── Image params ─────────────────────────────────────────────
+        self.img_cx    = 320.0
+        self.img_cy    = 240.0
+        self.area_norm = 640.0 * 480.0
         self.target_alpha = 0.0067
 
         # ── CSV ──────────────────────────────────────────────────────
@@ -106,103 +100,76 @@ class FlightLogger:
             # M7.3 target columns
             'target_px', 'target_py', 'target_pz',
             'target_cmd_vx', 'target_cmd_vy', 'target_cmd_vz', 'target_cmd_wz',
-            'dist_3d',          # legacy (broken cross-frame MAVROS) — kept for backward compat
+            'dist_3d',           # legacy broken cross-frame — kept for backward compat
             # M8 PPO columns
             'ppo_alpha_star', 'ppo_lambda',
-            # M8.2 true distance + fuzzy state columns
-            'true_dist_3d',     # Gazebo world-frame distance (accurate)
-            'fuzzy_d',          # fuzzy input 1: 3D distance (m)
-            'fuzzy_ddot',       # fuzzy input 2: closing rate (m/s)
-            'fuzzy_phi',        # fuzzy input 3: FOV exposure (0-1)
-            'fuzzy_perturb_deg',# OU heading perturbation (deg)
-            'fuzzy_speed',      # fuzzy output 1: commanded speed (m/s)
-            'fuzzy_omega',      # fuzzy output 2: turn rate (rad/s)
-            'fuzzy_vz',         # fuzzy output 3: vertical rate (m/s)
+            # M8.2 true distance + fuzzy state
+            'true_dist_3d',      # Gazebo world-frame 3D distance (accurate)
+            'fuzzy_d',           # fuzzy input: 3D distance (m)
+            'fuzzy_ddot',        # fuzzy input: closing rate (m/s)
+            'fuzzy_phi',         # fuzzy input: FOV exposure (0-1)
+            'fuzzy_perturb_deg', # OU heading perturbation (deg)
+            'fuzzy_speed',       # fuzzy output: commanded speed (m/s)
+            'fuzzy_omega',       # fuzzy output: turn rate (rad/s)
+            'fuzzy_vz',          # fuzzy output: vertical rate (m/s)
+            # M9.3 world-frame altitude error
+            'world_alt_err',     # chaser_wz - target_wz (Gazebo world frame, no spawn bias)
         ])
 
         # ── Subscribers ──────────────────────────────────────────────
-        # Chaser
-        rospy.Subscriber('/mavros/local_position/pose',  PoseStamped,
-                         self.pose_cb,   queue_size=1)
-        rospy.Subscriber('/mavros/setpoint_raw/local',   PositionTarget,
-                         self.cmd_cb,    queue_size=1)
-        rospy.Subscriber('/drone_tracking/ibvs_phase',   String,
-                         self.phase_cb,  queue_size=1)
-        rospy.Subscriber('/mavros/state', State,
-                         self.state_cb,  queue_size=1)
-        rospy.Subscriber('/drone_tracking/target_center', Point,
-                         self.raw_cb,    queue_size=1)
-        rospy.Subscriber('/drone_tracking/filtered_target', Point,
-                         self.flt_cb,    queue_size=1)
-        # Target (M7.3)
-        rospy.Subscriber('/target/mavros/local_position/pose', PoseStamped,
-                         self.target_pose_cb, queue_size=1)
-        rospy.Subscriber('/target/mavros/setpoint_raw/local',  PositionTarget,
-                         self.target_cmd_cb,  queue_size=1)
-        # PPO (M8)
-        rospy.Subscriber('/drone_tracking/ibvs_setpoints', Quaternion,
-                         self.ppo_cb,    queue_size=1)
-        # Gazebo world positions (M8.2) — true dist_3d
-        rospy.Subscriber('/gazebo/model_states', ModelStates,
-                         self.gazebo_cb, queue_size=1)
-        # Fuzzy state from target_mover (M8.2)
-        rospy.Subscriber('/drone_tracking/target_fuzzy_state', Float32MultiArray,
-                         self.fuzzy_cb,  queue_size=1)
+        rospy.Subscriber('/mavros/local_position/pose',    PoseStamped,      self.pose_cb,        queue_size=1)
+        rospy.Subscriber('/mavros/setpoint_raw/local',     PositionTarget,   self.cmd_cb,         queue_size=1)
+        rospy.Subscriber('/drone_tracking/ibvs_phase',     String,           self.phase_cb,       queue_size=1)
+        rospy.Subscriber('/mavros/state',                  State,            self.state_cb,       queue_size=1)
+        rospy.Subscriber('/drone_tracking/target_center',  Point,            self.raw_cb,         queue_size=1)
+        rospy.Subscriber('/drone_tracking/filtered_target',Point,            self.flt_cb,         queue_size=1)
+        rospy.Subscriber('/target/mavros/local_position/pose', PoseStamped,  self.target_pose_cb, queue_size=1)
+        rospy.Subscriber('/target/mavros/setpoint_raw/local',  PositionTarget,self.target_cmd_cb, queue_size=1)
+        rospy.Subscriber('/drone_tracking/ibvs_setpoints', Quaternion,       self.ppo_cb,         queue_size=1)
+        rospy.Subscriber('/gazebo/model_states',           ModelStates,      self.gazebo_cb,      queue_size=1)
+        rospy.Subscriber('/drone_tracking/target_fuzzy_state', Float32MultiArray, self.fuzzy_cb,  queue_size=1)
 
         self.rate = rospy.Rate(4)
-        rospy.loginfo("[FlightLogger] M8.2 Fuzzy-aware logger started (4 Hz)")
-        rospy.loginfo("[FlightLogger] CSV: %s" % self.csv_path)
-        rospy.loginfo("[FlightLogger] target_alpha=%.4f" % self.target_alpha)
+        rospy.loginfo("[FlightLogger] M9.3 started (4 Hz) | CSV: %s" % self.csv_path)
         self.run()
 
-    # ── Chaser callbacks ─────────────────────────────────────────────
+    # ── Callbacks ────────────────────────────────────────────────────
 
     def pose_cb(self, msg):
         self.pos_x = msg.pose.position.x
         self.pos_y = msg.pose.position.y
         self.pos_z = msg.pose.position.z
         q = msg.pose.orientation
-        sinr = 2.0*(q.w*q.x + q.y*q.z)
-        cosr = 1.0 - 2.0*(q.x*q.x + q.y*q.y)
+        sinr = 2.0*(q.w*q.x + q.y*q.z); cosr = 1.0 - 2.0*(q.x*q.x + q.y*q.y)
         self.roll  = math.atan2(sinr, cosr)
         sinp = 2.0*(q.w*q.y - q.z*q.x)
         self.pitch = math.asin(max(-1, min(1, sinp)))
-        siny = 2.0*(q.w*q.z + q.x*q.y)
-        cosy = 1.0 - 2.0*(q.y*q.y + q.z*q.z)
+        siny = 2.0*(q.w*q.z + q.x*q.y); cosy = 1.0 - 2.0*(q.y*q.y + q.z*q.z)
         self.yaw   = math.atan2(siny, cosy)
 
     def cmd_cb(self, msg):
-        self.cmd_vx    = msg.velocity.x
-        self.cmd_vy    = msg.velocity.y
-        self.cmd_vz    = msg.velocity.z
-        self.cmd_wz    = msg.yaw_rate
+        self.cmd_vx = msg.velocity.x; self.cmd_vy = msg.velocity.y
+        self.cmd_vz = msg.velocity.z; self.cmd_wz = msg.yaw_rate
         self.cmd_frame = msg.coordinate_frame
 
-    def phase_cb(self, msg):
-        self.phase = msg.data
-
-    def state_cb(self, msg):
-        self.armed = msg.armed
+    def phase_cb(self, msg): self.phase = msg.data
+    def state_cb(self, msg): self.armed = msg.armed
 
     def raw_cb(self, msg):
         if np.isnan(msg.x) or np.isnan(msg.y) or np.isnan(msg.z):
             self.raw_det = "NONE"; return
-        self.raw_cx         = msg.x
-        self.raw_cy         = msg.y
-        self.raw_alpha_pix  = abs(msg.z)
-        self.raw_det        = "REAL" if msg.z > 0 else "NONE"
+        self.raw_cx = msg.x; self.raw_cy = msg.y
+        self.raw_alpha_pix = abs(msg.z)
+        self.raw_det = "REAL" if msg.z > 0 else "NONE"
 
     def flt_cb(self, msg):
         if np.isnan(msg.x) or np.isnan(msg.y) or np.isnan(msg.z):
             self.flt_det = "NONE"; return
-        self.flt_cx        = msg.x
-        self.flt_cy        = msg.y
+        self.flt_cx = msg.x; self.flt_cy = msg.y
         self.flt_alpha_pix = abs(msg.z)
         if   msg.z > 0: self.flt_det = "REAL"
         elif msg.z < 0: self.flt_det = "PRED"
         else:           self.flt_det = "NONE"
-
-    # ── Target callbacks (M7.3) ──────────────────────────────────────
 
     def target_pose_cb(self, msg):
         self.target_px = msg.pose.position.x
@@ -211,20 +178,12 @@ class FlightLogger:
         self.got_target_pose = True
 
     def target_cmd_cb(self, msg):
-        self.target_cmd_vx = msg.velocity.x
-        self.target_cmd_vy = msg.velocity.y
-        self.target_cmd_vz = msg.velocity.z
-        self.target_cmd_wz = msg.yaw_rate
+        self.target_cmd_vx = msg.velocity.x; self.target_cmd_vy = msg.velocity.y
+        self.target_cmd_vz = msg.velocity.z; self.target_cmd_wz = msg.yaw_rate
         self.got_target_cmd = True
 
-    # ── PPO callback (M8) ────────────────────────────────────────────
-
     def ppo_cb(self, msg):
-        self.ppo_alpha_star = msg.z
-        self.ppo_lambda     = msg.w
-        self.got_ppo        = True
-
-    # ── Gazebo callback (M8.2) — true world positions ─────────────────
+        self.ppo_alpha_star = msg.z; self.ppo_lambda = msg.w; self.got_ppo = True
 
     def gazebo_cb(self, msg):
         try:
@@ -232,18 +191,14 @@ class FlightLogger:
             self.chaser_wx = msg.pose[ic].position.x
             self.chaser_wy = msg.pose[ic].position.y
             self.chaser_wz = msg.pose[ic].position.z
-        except (ValueError, IndexError):
-            pass
+        except (ValueError, IndexError): pass
         try:
             it = msg.name.index('target_iris')
             self.target_wx = msg.pose[it].position.x
             self.target_wy = msg.pose[it].position.y
             self.target_wz = msg.pose[it].position.z
             self.got_gazebo = True
-        except (ValueError, IndexError):
-            pass
-
-    # ── Fuzzy state callback (M8.2) ───────────────────────────────────
+        except (ValueError, IndexError): pass
 
     def fuzzy_cb(self, msg):
         if len(msg.data) >= 7:
@@ -270,7 +225,7 @@ class FlightLogger:
             ey = (self.flt_cy - self.img_cy) / self.img_cy if self.flt_det != "NONE" else 0.0
             ea = flt_alpha - self.target_alpha              if self.flt_det != "NONE" else 0.0
 
-            # Legacy dist_3d (broken cross-frame MAVROS — kept for backward compat)
+            # Legacy dist_3d (broken cross-frame — kept for backward compat)
             if self.got_target_pose:
                 dx = self.pos_x - self.target_px
                 dy = self.pos_y - self.target_py
@@ -279,14 +234,16 @@ class FlightLogger:
             else:
                 dist_3d = float('nan')
 
-            # True world-frame dist_3d from Gazebo (M8.2)
+            # True Gazebo world-frame distance (M8.2)
             if self.got_gazebo:
                 dx = self.chaser_wx - self.target_wx
                 dy = self.chaser_wy - self.target_wy
                 dz = self.chaser_wz - self.target_wz
-                true_dist_3d = math.sqrt(dx*dx + dy*dy + dz*dz)
+                true_dist_3d  = math.sqrt(dx*dx + dy*dy + dz*dz)
+                world_alt_err = self.chaser_wz - self.target_wz   # M9.3
             else:
-                true_dist_3d = float('nan')
+                true_dist_3d  = float('nan')
+                world_alt_err = float('nan')
 
             def f(v, fmt='%.3f'):
                 return fmt % v if not math.isnan(v) else ''
@@ -306,19 +263,16 @@ class FlightLogger:
                 '%.5f' % flt_alpha, self.flt_det,
                 '%.5f' % alpha_delta,
                 '%.3f' % ex, '%.3f' % ey, '%.5f' % ea,
-                # M7.3 target columns
-                f(self.target_px) if self.got_target_pose else '',
-                f(self.target_py) if self.got_target_pose else '',
-                f(self.target_pz) if self.got_target_pose else '',
-                f(self.target_cmd_vx) if self.got_target_cmd else '',
-                f(self.target_cmd_vy) if self.got_target_cmd else '',
-                f(self.target_cmd_vz) if self.got_target_cmd else '',
-                f(self.target_cmd_wz) if self.got_target_cmd else '',
-                '%.2f' % dist_3d if not math.isnan(dist_3d) else '',
-                # M8 PPO columns
+                f(self.target_px)      if self.got_target_pose else '',
+                f(self.target_py)      if self.got_target_pose else '',
+                f(self.target_pz)      if self.got_target_pose else '',
+                f(self.target_cmd_vx)  if self.got_target_cmd  else '',
+                f(self.target_cmd_vy)  if self.got_target_cmd  else '',
+                f(self.target_cmd_vz)  if self.got_target_cmd  else '',
+                f(self.target_cmd_wz)  if self.got_target_cmd  else '',
+                '%.2f' % dist_3d       if not math.isnan(dist_3d)      else '',
                 '%.5f' % self.ppo_alpha_star if self.got_ppo else '',
                 '%.3f' % self.ppo_lambda     if self.got_ppo else '',
-                # M8.2 true distance + fuzzy state
                 '%.2f' % true_dist_3d        if self.got_gazebo else '',
                 f(self.fuzzy_d,    '%.2f')   if self.got_fuzzy else '',
                 f(self.fuzzy_ddot, '%.3f')   if self.got_fuzzy else '',
@@ -327,6 +281,7 @@ class FlightLogger:
                 f(self.fuzzy_speed, '%.3f')  if self.got_fuzzy else '',
                 f(self.fuzzy_omega, '%.3f')  if self.got_fuzzy else '',
                 f(self.fuzzy_vz,   '%.3f')   if self.got_fuzzy else '',
+                '%.3f' % world_alt_err if not math.isnan(world_alt_err) else '',  # M9.3
             ])
             self.csv_file.flush()
             self.rate.sleep()
