@@ -47,11 +47,11 @@ class IBVSController:
         self.x_star=0.; self.y_star=0.; self.alpha_star=0.0067; self.lam=0.5
 
         # ── Distance gains ────────────────────────────────────────────
-        self.K_far  = 30.0       # v6.19: proportional (was 28)
+        self.K_far  = 35.0       # v6.19: proportional (was 28)
         self.K_near = 6.0
         self.Kd_a   = 100.0      # v6.19: NEW — alpha-rate feedforward
         self.ff_max = 1.5        # v6.19: feedforward cap (m/s)
-        self.DEAD_ZONE = 0.001   # v6.17: ±0.001 around alpha_star
+        self.DEAD_ZONE = 0.002   # v6.17: ±0.001 around alpha_star
 
         # Y / Z / yaw PID
         self.Kp_y=1.4; self.Ki_y=0.05; self.Kd_y=0.3
@@ -69,9 +69,9 @@ class IBVSController:
         self.pred_gain_scale=0.7
         self.APPROACH_RAMP_S=2.0; self.approach_start_time=None
         self.recovery_duration=2.0; self.recovery_start_time=None
-        self.vel_smooth_normal=0.35; self.vel_smooth_reversal=0.1  # v6.19: 0.5→0.35
+        self.vel_smooth_normal=0.15; self.vel_smooth_reversal=0.1  # v6.19: 0.5→0.35
 
-        self.cx=self.cy=None; self.alpha=0.
+        self.cx=self.cy=None; self.alpha=0.; self.last_cx=self.last_cy=None
         self.got_real_detection=False; self.is_prediction=False
         self.last_real_detection_time=None
         self.armed=False; self.altitude=0.; self.current_pitch=0.
@@ -112,6 +112,7 @@ class IBVSController:
         if m.z>0:
             self.got_real_detection=True;self.is_prediction=False
             self.last_real_detection_time=rospy.Time.now()
+            self.last_cx=m.x; self.last_cy=m.y   # v6.20: SEARCH memory
         else: self.got_real_detection=False;self.is_prediction=True
     def setpoints_cb(self,m):
         if not self.USE_PPO:return
@@ -203,7 +204,14 @@ class IBVSController:
                 if self.takeoff_ready: self.phase="SEARCH"
                 pub=False
             elif self.phase=="SEARCH":
-                cvz=float(np.clip((self.min_altitude_safe-self.altitude)*.3,-.20,.30))
+                if self.last_cx is not None:   # v6.20: directional search
+                    ex_s=(self.last_cx-self.img_cx)/self.img_cx
+                    ey_s=(self.last_cy-self.img_cy)/self.img_cy
+                    cvx=0.3                                           # slow forward creep
+                    cwz=float(np.clip(-0.3*ex_s,-self.max_wz,self.max_wz))  # yaw toward last cx
+                    cvz=float(np.clip(-0.3*ey_s,-0.35,0.35))         # altitude toward last cy
+                else:
+                    cvz=float(np.clip((self.min_altitude_safe-self.altitude)*.3,-.20,.30))
                 if self.got_real_detection and self.alpha>self.alpha_min_valid:
                     self.reset_pid();self.approach_start_time=rospy.Time.now()
                     self.phase="APPROACH"
