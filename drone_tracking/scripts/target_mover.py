@@ -149,6 +149,9 @@ class TargetMover:
         self._straight_dir=1.; self._straight_start_x=self._straight_start_y=0.; self._incline_vz_dir=1.
         self.heading=0.; self.speed_ema=0.5; self.vz_ema=0.
         self.hdg_perturb=0.; self._last_phi_high=False; self._prev_d=None; self._d_dot_ema=0.
+        # v10.0: maneuver state machine
+        self._maneuver_timer=0.; self._maneuver_interval=5.0
+        self._maneuver_type='VX'; self._vy_sign=1.0; self._vy_intensity=1.0; self._vy_escape=0.
         self._lat_half_t=0.; self._lat_cycle=0
         self._lat_A=math.radians(55.); self._lat_T=5.
         self._vert_half_t=0.; self._vert_cycle=0; self._vert_B=0.5; self._vert_Tz=7.
@@ -366,24 +369,46 @@ class TargetMover:
         self.heading+=(self._repulsion_omega(self.pos_x,self.pos_y)+self._chaser_avoidance_omega()+self._anti_headon_omega())*dt
         self.heading=math.atan2(math.sin(self.heading),math.cos(self.heading))
 
-        # v9.8: FOV-calibrated speed — ensure lateral velocity exceeds chaser yaw
-        min_speed=self._fov_min_speed(d,self._current_weave_offset,phi)
-        effective_speed=max(f_speed,min_speed)
-        effective_speed=min(effective_speed,3.5)  # cap at max
-        self.speed_ema+=0.20*(effective_speed-self.speed_ema)
+        # v10.0: maneuver state machine — [3,8]s intervals, multi-axis escape
+        self._maneuver_timer+=dt
+        if self._maneuver_timer>=self._maneuver_interval:
+            self._maneuver_timer=0.
+            self._maneuver_interval=random.uniform(3.,8.)
+            types =['VX',  'VY',  'VZ',  'VX_VY','VY_VZ','VX_VY_VZ']
+            weights=[0.10,  0.25,  0.10,  0.25,   0.20,   0.10]
+            self._maneuver_type=random.choices(types,weights=weights)[0]
+            self._vy_sign=random.choice([-1.,1.])
+            self._vy_intensity=random.uniform(1.0,1.5)
+            rospy.loginfo("[TargetMover] v10.0 Maneuver: %s vy=%+.1f phi=%.2f d=%.1fm"
+                          %(self._maneuver_type,self._vy_sign*self._vy_intensity,phi,d))
+
+        # vy strafe — active when maneuver includes VY
+        # phi_scale: minimum 0.5 so target keeps running even when outside FOV
+        phi_scale=max(0.5,phi)
+        if 'VY' in self._maneuver_type:
+            vy_target=self._vy_sign*self._vy_intensity*phi_scale
+        else:
+            vy_target=0.
+        self._vy_escape+=0.04*(vy_target-self._vy_escape)  # slow EMA ~0.5s ramp
+
+        # Speed: simple floor 0.70 m/s always — no binary sprint/drift
+        # Fuzzy controls base speed, EMA alpha 0.10 for smoother transitions
+        effective_speed=max(f_speed,0.70)
+        effective_speed=min(effective_speed,3.0)
+        self.speed_ema+=0.10*(effective_speed-self.speed_ema)
 
         vz_combined=f_vz+self._vert_weave_vz(dt)
         self.vz_ema+=0.12*(self._clamp_vz(vz_combined)-self.vz_ema)
         vx=self.speed_ema*math.cos(self.heading)
-        vy=self.speed_ema*math.sin(self.heading)
+        vy=self.speed_ema*math.sin(self.heading)+self._vy_escape   # strafe added
         vz=self.vz_ema
         if self.pos_z<self.Z_FLOOR+0.4 and vz<0:vz=0.20
         if self.pos_z>self.Z_CEIL-0.4 and vz>0:vz=-0.20
         ye=math.atan2(math.sin(self.heading-self.yaw),math.cos(self.heading-self.yaw))
         ys=math.copysign(1.,he) if abs(he)>0.01 else 0.
         yr=ys*f_omega*.3+1.5*ye
-        vx=max(-3.5,min(3.5,vx));vy=max(-3.5,min(3.5,vy))
-        vz=max(-1.,min(1.,vz));yr=max(-.8,min(.8,yr))
+        vx=max(-3.0,min(3.0,vx));vy=max(-3.0,min(3.0,vy))
+        vz=max(-1.2,min(1.2,vz));yr=max(-.8,min(.8,yr))
         fs=Float32MultiArray()
         fs.data=[float(d),float(d_dot),float(phi),float(math.degrees(self.hdg_perturb)),
                  float(f_speed),float(f_omega),float(f_vz)]

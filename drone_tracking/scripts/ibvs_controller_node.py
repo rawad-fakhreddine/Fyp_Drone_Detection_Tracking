@@ -43,24 +43,24 @@ class IBVSController:
         self.img_w=640.; self.img_h=480.
         self.img_cx=self.img_w/2.; self.img_cy=self.img_h/2.
         self.area_norm=self.img_w*self.img_h
-        self.pitch_compensation_gain=0.8
+        self.pitch_compensation_gain=0.4
         self.x_star=0.; self.y_star=0.; self.alpha_star=0.0067; self.lam=0.5
 
         # ── Distance gains ────────────────────────────────────────────
         self.K_far  = 35.0       # v6.19: proportional (was 28)
         self.K_near = 6.0
-        self.Kd_a   = 100.0      # v6.19: NEW — alpha-rate feedforward
+        self.Kd_a   = 150.0      # v6.19: NEW — alpha-rate feedforward
         self.ff_max = 1.5        # v6.19: feedforward cap (m/s)
         self.DEAD_ZONE = 0.002   # v6.17: ±0.001 around alpha_star
 
         # Y / Z / yaw PID
         self.Kp_y=1.4; self.Ki_y=0.05; self.Kd_y=0.3
-        self.Kp_z=1.8; self.Ki_z=0.04; self.Kd_z=0.5
+        self.Kp_z=2.5; self.Ki_z=0.04; self.Kd_z=0.5
         self.Kp_wz=0.9; self.Ki_wz=0.; self.Kd_wz=0.15
 
         # Velocity limits
         self.max_vx=3.0; self.max_vx_retreat=0.50   # v6.19: 2.0→3.0
-        self.max_vy=0.85; self.max_vz=0.8; self.max_wz=0.4
+        self.max_vy=0.85; self.max_vz=1.2; self.max_wz=0.4
 
         self.min_altitude_safe=1.0; self.alpha_min_valid=0.0005
         self.err_x_max=0.8; self.err_y_max=0.8; self.err_a_max=0.018
@@ -164,7 +164,7 @@ class IBVSController:
         self.int_err_y=np.clip(self.int_err_y+ex*self.dt,-self.int_y_max,self.int_y_max)
         self.int_err_z=np.clip(self.int_err_z+ey*self.dt,-self.int_z_max,self.int_z_max)
 
-        lam_gain=(.3+.7*self.lam) if self.ppo_is_active() else .65
+        lam_gain=(.4+.6*self.lam) if self.ppo_is_active() else .70
         gain=gain_scale*lam_gain
 
         # ── v6.19: PD control on alpha with adaptive feedforward ──────
