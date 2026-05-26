@@ -40,7 +40,7 @@ class KalmanFilterNode:
     OUTLIER_NEW_ALPHA_PIX  = 900.0
 
     # M9.3: position-jump outlier
-    PIXEL_JUMP_OUTLIER = 200.0   # px — rejects tree false positives (426px)
+    PIXEL_JUMP_OUTLIER = 120.0   # px — rejects tree false positives (426px)
                                   # safe for fast tracking (max ~60px normal)
 
     # M9.3: increased escape hatch for sustained occlusion
@@ -64,10 +64,10 @@ class KalmanFilterNode:
         self.H[2, 2] = 1
 
         # M9.2 noise tuning (fast-target calibrated)
-        self.R = np.diag([1.0, 1.0, 5.0])
-        self.Q = np.diag([2.0, 2.0, 3.0, 4.0, 4.0, 2.0])
+        self.R = np.diag([3.0, 3.0, 5.0])
+        self.Q = np.diag([2.0, 2.0, 3.0, 6.0, 6.0, 3.0])
 
-        self.velocity_damping = 0.92   # M9.2
+        self.velocity_damping = 0.88   # M9.2
 
         self.initialized            = False
         self.dropout_count          = 0

@@ -67,7 +67,7 @@ class FuzzyEscaper:
         return {'MUCH_ABOVE':t(dz,3,5,1e9,1e9),'ABOVE':r(dz,1,2.5,4),'SAME':r(dz,-2,0,2),'BELOW':r(dz,-4,-2.5,-1),'MUCH_BELOW':t(dz,-1e9,-1e9,-5,-3)}
     def _mf_speed(s,v,t):
         T,R=s._trap,s._tri
-        return {'SLOW':R(v,.50,.70,.90),'NORMAL':R(v,.80,1.20,1.60),'FAST':R(v,1.40,2.00,2.60),'SPRINT':T(v,2.30,2.80,3.50,3.50)}[t]
+        return {'SLOW':R(v,.50,.70,.90),'NORMAL':R(v,.80,1.40,1.80),'FAST':R(v,1.60,2.30,3.00),'SPRINT':T(v,2.80,3.20,3.80,3.80)}[t]
     def _mf_omega(s,v,t):
         T,R=s._trap,s._tri
         return {'NONE':T(v,0,0,.05,.12),'GENTLE':R(v,.08,.20,.35),'MODERATE':R(v,.28,.48,.68),'SHARP':R(v,.58,.75,.92),'MAX':T(v,.85,.98,1.20,1.20)}[t]
@@ -99,7 +99,7 @@ class FuzzyEscaper:
         f(min(D['FAR'],V['FAST_CLOSING']),sp_='NORMAL',om_='GENTLE')
         f(min(D['FAR'],F['CENTERED']),sp_='NORMAL',om_='MODERATE')
         f(D['VERY_FAR'],sp_='SLOW',om_='NONE')
-        f(F['OUTSIDE'],sp_='SLOW',om_='NONE')
+        f(F['OUTSIDE'],sp_='NORMAL',om_='GENTLE')
         f(min(V['FAST_CLOSING'],F['CENTERED']),sp_='SPRINT',om_='MAX')
         f(min(D['FAR'],V['RECEDING']),sp_='SLOW',om_='NONE')
         f(min(D['MEDIUM'],F['EDGE']),sp_='SLOW',om_='GENTLE')
@@ -378,7 +378,7 @@ class TargetMover:
             weights=[0.10,  0.25,  0.10,  0.25,   0.20,   0.10]
             self._maneuver_type=random.choices(types,weights=weights)[0]
             self._vy_sign=random.choice([-1.,1.])
-            self._vy_intensity=random.uniform(1.0,1.5)
+            self._vy_intensity=random.uniform(1.5,2.0)
             rospy.loginfo("[TargetMover] v10.0 Maneuver: %s vy=%+.1f phi=%.2f d=%.1fm"
                           %(self._maneuver_type,self._vy_sign*self._vy_intensity,phi,d))
 
@@ -389,11 +389,11 @@ class TargetMover:
             vy_target=self._vy_sign*self._vy_intensity*phi_scale
         else:
             vy_target=0.
-        self._vy_escape+=0.04*(vy_target-self._vy_escape)  # slow EMA ~0.5s ramp
+        self._vy_escape+=0.08*(vy_target-self._vy_escape)  # slow EMA ~0.5s ramp
 
         # Speed: simple floor 0.70 m/s always — no binary sprint/drift
         # Fuzzy controls base speed, EMA alpha 0.10 for smoother transitions
-        effective_speed=max(f_speed,0.70)
+        effective_speed=max(f_speed,1.00)
         effective_speed=min(effective_speed,3.0)
         self.speed_ema+=0.10*(effective_speed-self.speed_ema)
 
