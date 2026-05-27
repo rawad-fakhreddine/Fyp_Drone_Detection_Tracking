@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ibvs_controller_node.py  —  v6.23  (2-stage velocity-predicted SEARCH)
+ibvs_controller_node.py  —  v6.24  (2-stage velocity-predicted SEARCH)
 =======================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
@@ -71,7 +71,7 @@ class IBVSController:
         self.Kp_wz=0.9; self.Ki_wz=0.; self.Kd_wz=0.15
 
         # Velocity limits
-        self.max_vx=3.0; self.max_vx_retreat=0.50
+        self.max_vx=3.5; self.max_vx_retreat=0.50
         self.max_vy=1.20; self.max_vz=1.5; self.max_wz=0.5
 
         # v6.22: min_altitude_safe raised to match new Z_FLOOR=12m
@@ -280,7 +280,7 @@ class IBVSController:
                     ex_=abs((self.cx-self.img_cx)/self.img_cx-self.x_star)
                     ey_=abs((self.cy-self.img_cy)/self.img_cy-self.y_star)
                     ea_=abs(self.alpha-self.alpha_star)
-                    if ex_<.12 and ey_<.12 and ea_<.005:
+                    if ex_<.12 and ey_<.12 and ea_<.010:
                         self.phase="HOLD";rospy.loginfo("[IBVS] Centered → HOLD")
                 elif self.is_prediction:
                     cvx,cvy,cvz,cwz=self.compute_velocities(gain_scale=self.pred_gain_scale)

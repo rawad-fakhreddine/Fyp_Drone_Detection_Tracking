@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-kalman_filter_node.py  —  M9.7
+kalman_filter_node.py  —  M9.8
 ================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
@@ -48,10 +48,10 @@ class KalmanFilterNode:
     OUTLIER_NEW_ALPHA_PIX  = 900.0
 
     # M9.4: tightened from 200px — catches grey-object false positives
-    PIXEL_JUMP_OUTLIER = 120.0
+    PIXEL_JUMP_OUTLIER = 180.0
 
     # M9.3: increased escape hatch
-    MAX_CONSECUTIVE_REJECTIONS = 8
+    MAX_CONSECUTIVE_REJECTIONS = 4
 
     def __init__(self):
         rospy.init_node('kalman_filter_node')
@@ -73,7 +73,7 @@ class KalmanFilterNode:
         # M9.6: Q_vel cx/cy 6.0 → 3.0 — smoother cx/cy velocity estimate
         # M9.5: R_pos raised to 6.0 — smooth YOLO bbox bounce
         self.R = np.diag([6.0, 6.0, 5.0])
-        self.Q = np.diag([0.5, 0.5, 3.0, 5.0, 5.0, 3.0])
+        self.Q = np.diag([0.5, 0.5, 3.0, 6.0, 6.0, 3.0])
 
         # M9.4: faster velocity decay during dropout
         self.velocity_damping = 0.88
@@ -90,7 +90,7 @@ class KalmanFilterNode:
         rospy.Subscriber(
             '/drone_tracking/target_center', Point, self.callback)
 
-        rospy.loginfo("[Kalman] M9.6 | R_pos=6.0 R_alpha=5.0 | Q_vel=5.0 | "
+        rospy.loginfo("[Kalman] M9.6 | R_pos=6.0 R_alpha=5.0 | Q_vel=6.0 | "
                       "jump=%.0fpx | damp=%.2f"
                       % (self.PIXEL_JUMP_OUTLIER, self.velocity_damping))
 
