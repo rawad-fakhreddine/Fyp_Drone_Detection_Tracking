@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-target_mover.py  —  v10.4  Longer Maneuver Intervals + Phi-Adaptive Maneuvers
+target_mover.py  —  v10.5  Speed [1,3.5] + Phi-Adaptive Maneuvers
 =====================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
@@ -70,7 +70,7 @@ VEL_YR_MASK = (
 #  FUZZY ESCAPER  —  v10.3  (speed universe [1.0, 4.0])
 # ═══════════════════════════════════════════════════════════════════════
 class FuzzyEscaper:
-    _SP=[1.00+i*3./60 for i in range(61)]   # [1.0 .. 4.0]
+    _SP=[1.00+i*2.5/60 for i in range(61)]   # [1.0 .. 4.0]
     _OM=[0.00+i*1.20/60 for i in range(61)]
     _VZ=[-1.00+i*2./60 for i in range(61)]
     @staticmethod
@@ -536,7 +536,7 @@ class TargetMover:
 
         # Speed: floor 1.0 m/s, clamp 4.0 m/s (v10.3)
         effective_speed = max(f_speed, 1.00)
-        effective_speed = min(effective_speed, 4.0)
+        effective_speed = min(effective_speed, 3.5)
         self.speed_ema += 0.10 * (effective_speed - self.speed_ema)
 
         # Vertical: fuzzy vz + weave + maneuver vz dodge
@@ -559,8 +559,8 @@ class TargetMover:
         yr = ys * f_omega * .3 + 1.5 * ye
 
         # Velocity clamps (v10.3: vx/vy 3.5→4.0, vz 1.5→2.0)
-        vx = max(-4.0, min(4.0, vx))
-        vy = max(-4.0, min(4.0, vy))
+        vx = max(-3.5, min(3.5, vx))
+        vy = max(-3.5, min(3.5, vy))
         vz = max(-2.0, min(2.0, vz))
         yr = max(-.8,  min(.8,  yr))
 

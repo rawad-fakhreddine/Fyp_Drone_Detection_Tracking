@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-random_spawn_target.py — v2.0: Full island coverage
+random_spawn_target.py — v3.0: Exact GPS-surveyed spawn zones
 =====================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
@@ -43,14 +43,15 @@ from std_msgs.msg import String
 # Format: (center_x, center_y, description)
 # All zones verified against terrain mesh bounds and screenshot analysis
 SPAWN_ZONES = {
-    'A': (-40,   30,  "Center-south — open field near sports area"),
-    'B': (-170,  70,  "Upper-north — structures and shelters"),
-    'C': (-80,   50,  "Upper-center — winding paths"),          # confirmed good
-    'D': (-120, -70,  "Northwest — stream and tree-lined paths"),
-    'E': (10,  -100,  "West — circular garden features"),
-    'F': (60,  -110,  "Southwest — lower circular gardens"),
-    'G': (90,   -10,  "South-center — open paths"),
-    'H': (30,   -80,  "Lower park area"),                       # confirmed good
+    '1': (  -5.5,    40,  "Zone 1 — center area"),
+    '2': (-140,     -50,  "Zone 2 — northwest"),
+    '3': (-140,     115,  "Zone 3 — north"),
+    '4': (-350,      35,  "Zone 4 — far north"),
+    '5': (-305,     -75,  "Zone 5 — far northwest"),
+    '6': (-200,    -115,  "Zone 6 — west"),
+    '7': (  -45,   -170,  "Zone 7 — southwest"),
+    '8': (  100,   -285,  "Zone 8 — far south"),
+    '9': (  260,   -165,  "Zone 9 — southeast"),
 }
 
 # Jitter reduced from ±15m to ±8m — prevents drift toward water edges
@@ -114,7 +115,7 @@ def main():
     # Pick zone
     if zone_name == 'random':
         zone_key = random.choice(list(SPAWN_ZONES.keys()))
-    elif zone_name.upper() in SPAWN_ZONES:
+    elif zone_name in SPAWN_ZONES:
         zone_key = zone_name.upper()
     else:
         rospy.logwarn("[RandomSpawn] Unknown zone '%s', picking random" % zone_name)
@@ -151,7 +152,7 @@ def main():
 
     rospy.loginfo("")
     rospy.loginfo("=" * 65)
-    rospy.loginfo("[RandomSpawn] v2.0 | Zone %s: %s" % (zone_key, desc))
+    rospy.loginfo("[RandomSpawn] v3.0 | Zone %s: %s" % (zone_key, desc))
     rospy.loginfo("=" * 65)
     rospy.loginfo("  Chaser:  x=%.1f  y=%.1f  z=%.1f  yaw=%.0f deg"
                   % (chaser_x, chaser_y, chaser_z, math.degrees(chaser_yaw)))
