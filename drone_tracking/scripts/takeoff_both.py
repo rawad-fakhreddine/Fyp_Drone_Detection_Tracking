@@ -43,7 +43,7 @@ LOCAL_VEL_MASK = (
     PositionTarget.IGNORE_YAW
 )
 
-TAKEOFF_ALT   = 12.0    # v9.6: was 1.5 — matches target RISE_TO_Z=8m
+TAKEOFF_ALT   = 10.0    # v9.6: was 1.5 — matches target RISE_TO_Z=8m
 ALT_TOLERANCE = 0.50   # v9.6: was 0.25 — slightly wider band at 7m
 CALM_DURATION = 2.0
 RAMP_DURATION = 1.5
