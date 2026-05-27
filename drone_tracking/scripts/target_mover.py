@@ -1,42 +1,56 @@
 #!/usr/bin/env python3
 """
-target_mover.py  —  v10.2  Always-Escape + 7-Axis Maneuver System
-===================================================================
+target_mover.py  —  v10.4  Longer Maneuver Intervals + Phi-Adaptive Maneuvers
+=====================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
-v10.2 changes (on top of v10.1):
-  FUZZY RULES — "Always Escape" principle:
-    Previous: target slowed to SLOW/NONE at EDGE/FAR → contradiction
-              (target escapes to edge, then stops, lets chaser re-center)
-    New:      target ALWAYS escapes at ≥ NORMAL speed except VERY_FAR
-              Intensity = phi × closeness:
-                CENTERED+CLOSE  → SPRINT/MAX     (maximum urgency)
-                CENTERED+MEDIUM → SPRINT/SHARP   (high urgency)
-                CENTERED+FAR    → FAST/MODERATE  (moderate urgency)
-                EDGE+CLOSE      → FAST/MODERATE  (still escaping)
-                EDGE+MEDIUM     → NORMAL/MODERATE (edge = partial success)
-                EDGE+FAR        → NORMAL/GENTLE  (far+edge = success, maintain)
-                OUTSIDE         → FAST/GENTLE    (escaped, keep going!)
-                VERY_FAR        → SLOW/NONE      (only stop here for re-engage)
+v10.3 changes (on top of v10.2):
+  SPEED RANGE [1.0 → 4.0 m/s]:
+    Universe shifted from [0.5, 3.5] to [1.0, 4.0].
+    Floor stays at 1.0 (universe minimum). Clamp at 4.0.
+    MFs: SLOW  tri(1.00,1.20,1.50)  — near floor
+         NORMAL tri(1.30,1.80,2.30)
+         FAST   tri(2.10,2.80,3.50)
+         SPRINT trap(3.20,3.60,4.00,4.00)
+    Note: high omega rules allow large heading changes; this naturally
+    caps net ground displacement while keeping the chaser challenged.
 
-  MANEUVER SYSTEM — 7-axis distance-adaptive:
-    7 escape methods: VX, VY, VZ, VX_VY, VY_VZ, VX_VZ, VX_VY_VZ
-    Distance-adaptive intensity:
-      CLOSE (d<5m):   vy=[1.0,1.5]  vz=[0.5,1.0]  interval=[2,4]s
-      MEDIUM (5-8m):  vy=[1.5,2.0]  vz=[0.8,1.2]  interval=[2,5]s
-      FAR (d>8m):     vy=[2.0,3.0]  vz=[1.0,1.5]  interval=[3,6]s
-    Both vy_escape and vz_escape EMA-ramped (smooth, no stops)
-    Removed _fov_min_speed (was binary sprint/drift source)
+  ALTITUDE RANGE EXTENDED:
+    Z_FLOOR:   10.0 → 12.0 m  (clears tall trees)
+    Z_CEIL:    20.0 → 24.0 m  (more vertical escape room)
+    RISE_TO_Z: 12.0 → 14.0 m  (target cruises higher)
+    RISE_VZ:   0.8  → 1.2 m/s (faster initial climb)
+    STABILIZE_TIME: 3.0 → 1.5 s (less SETTLING pause at altitude)
+    vz clamp:  ±1.5 → ±2.0 m/s
 
-v10.1 changes (preserved):
-  Floor: 0.70→1.00 m/s, SPRINT center 2.80→3.20, vy=[1.5,2.0]
+  VERTICAL MANEUVERABILITY:
+    VERT_B:   [0.40,0.80] → [0.60,1.20] m/s  (stronger altitude weave)
+    VERT_T:   [5.0, 10.0] → [4.0, 8.0]  s   (faster vertical cycles)
+    vz_intensity CLOSE: [0.8,1.2] → [1.0,1.5]
+    vz_intensity MID:   [1.0,1.5] → [1.2,2.0]
+    vz_intensity FAR:   [1.2,2.0] → [1.5,2.5]
+    Altitude escape boost multiplier: 1.0 → 1.3
 
-v10.0 changes (preserved):
-  Maneuver state machine added, vy strafe, speed EMA 0.20→0.10
+  PHI-ADAPTIVE MANEUVER INTERVALS (4-tier):
+    d<3m:   base [1.0,2.0]s  — very close, panic mode
+    d<5m:   base [1.5,3.0]s
+    d<8m:   base [2.5,4.5]s
+    d>=8m:  base [3.5,6.0]s
+    phi_factor = 0.6 + 0.7*(1-phi):
+      phi=1.0 (centered): ×0.6 → fastest maneuver changes
+      phi=0.5 (partial):  ×0.95 → normal
+      phi=0.0 (escaped):  ×1.3  → maintain current escape heading
 
-v9.9 changes (preserved):
-  Z_FLOOR=10.0, RISE_TO_Z=12.0, Z_CEIL=20.0
+  DIRECTIONAL VARIETY (no vx reduction):
+    OU_SIGMA_MAX: 0.70 → 1.00  (wider random heading swings)
+    OU_LIMIT:     π/3 → π/2.5  (±60° → ±72° heading envelope)
+    LAT_A_MIN: 40° → 50°  (higher baseline lateral weave)
+    LAT_A_MAX: 75° → 90°  (wider max lateral weave)
+    Maneuver weights: VX 8%→4%, VY 18%→22%, VY_VZ 16%→20%
+
+v10.2 changes (preserved):
+  Always-Escape fuzzy rules, 7-axis maneuver SM, EDGE→FAST
 
 Phase flow: WAITING → RISING → SETTLING → MOVING
 """
@@ -53,10 +67,10 @@ VEL_YR_MASK = (
     PositionTarget.IGNORE_YAW)
 
 # ═══════════════════════════════════════════════════════════════════════
-#  FUZZY ESCAPER  —  v10.2  (Always-Escape rules)
+#  FUZZY ESCAPER  —  v10.3  (speed universe [1.0, 4.0])
 # ═══════════════════════════════════════════════════════════════════════
 class FuzzyEscaper:
-    _SP=[0.50+i*3./60 for i in range(61)]
+    _SP=[1.00+i*3./60 for i in range(61)]   # [1.0 .. 4.0]
     _OM=[0.00+i*1.20/60 for i in range(61)]
     _VZ=[-1.00+i*2./60 for i in range(61)]
     @staticmethod
@@ -90,9 +104,9 @@ class FuzzyEscaper:
                 'MUCH_BELOW':t(dz,-1e9,-1e9,-5,-3)}
     def _mf_speed(s,v,t):
         T,R=s._trap,s._tri
-        # v10.1: raised NORMAL center 1.20→1.40, FAST 2.00→2.30, SPRINT 2.80→3.20
-        return {'SLOW':R(v,.50,.70,.90),'NORMAL':R(v,.80,1.40,1.80),
-                'FAST':R(v,1.60,2.30,3.00),'SPRINT':T(v,2.80,3.20,3.80,3.80)}[t]
+        # v10.3: speed universe [1.0, 4.0]
+        return {'SLOW':R(v,1.00,1.20,1.50),'NORMAL':R(v,1.30,1.80,2.30),
+                'FAST':R(v,2.10,2.80,3.50),'SPRINT':T(v,3.20,3.60,4.00,4.00)}[t]
     def _mf_omega(s,v,t):
         T,R=s._trap,s._tri
         return {'NONE':T(v,0,0,.05,.12),'GENTLE':R(v,.08,.20,.35),
@@ -119,29 +133,28 @@ class FuzzyEscaper:
             if vz_:vz[vz_]=max(vz[vz_],s_)
 
         # ── v10.2: ALWAYS ESCAPE — intensity = phi × closeness ────────
-        # Only VERY_FAR uses SLOW (re-engagement). All others: NORMAL minimum.
-        f(D['VERY_CLOSE'],sp_='SPRINT',om_='MAX')                           # d<3m: max panic
-        f(min(D['CLOSE'],V['FAST_CLOSING']),sp_='SPRINT',om_='SHARP')      # closing fast
-        f(min(D['CLOSE'],F['CENTERED']),sp_='SPRINT',om_='SHARP')          # close+centered
-        f(min(D['CLOSE'],F['PARTIAL']),sp_='SPRINT',om_='MODERATE')        # close+partial: upgraded
-        f(min(D['CLOSE'],F['EDGE']),sp_='FAST',om_='MODERATE')             # close+edge: was NORMAL
-        f(min(D['MEDIUM'],V['FAST_CLOSING']),sp_='SPRINT',om_='MODERATE')  # upgraded from FAST
-        f(min(D['MEDIUM'],F['CENTERED']),sp_='SPRINT',om_='SHARP')         # med+centered
-        f(min(D['MEDIUM'],F['PARTIAL']),sp_='FAST',om_='MODERATE')         # med+partial: +omega
-        f(min(D['MEDIUM'],F['EDGE']),sp_='FAST',om_='MODERATE')          # was SLOW: fixed
-        f(min(D['FAR'],V['FAST_CLOSING']),sp_='FAST',om_='GENTLE')         # upgraded from NORMAL
-        f(min(D['FAR'],F['CENTERED']),sp_='FAST',om_='MODERATE')           # upgraded from NORMAL
-        f(min(D['FAR'],F['PARTIAL']),sp_='NORMAL',om_='GENTLE')            # was SLOW: fixed
-        f(min(D['FAR'],F['EDGE']),sp_='FAST',om_='GENTLE')               # was SLOW: fixed
-        f(min(D['FAR'],V['RECEDING']),sp_='NORMAL',om_='GENTLE')           # was SLOW: fixed
-        f(D['VERY_FAR'],sp_='SLOW',om_='NONE')                             # ONLY slow: re-engage
-        f(F['OUTSIDE'],sp_='FAST',om_='GENTLE')                            # escaped: keep going!
-        f(min(V['FAST_CLOSING'],F['CENTERED']),sp_='SPRINT',om_='MAX')     # emergency sprint
-        f(min(D['VERY_FAR'],F['CENTERED']),sp_='NORMAL',om_='GENTLE')      # very far+centered: was SLOW
-        f(min(F['CENTERED'],V['STABLE']),sp_='FAST',om_='SHARP')           # centered+stable: escape
-        f(min(F['CENTERED'],V['CLOSING']),sp_='SPRINT',om_='MAX')          # centered+closing: max
+        f(D['VERY_CLOSE'],sp_='SPRINT',om_='MAX')
+        f(min(D['CLOSE'],V['FAST_CLOSING']),sp_='SPRINT',om_='SHARP')
+        f(min(D['CLOSE'],F['CENTERED']),sp_='SPRINT',om_='SHARP')
+        f(min(D['CLOSE'],F['PARTIAL']),sp_='SPRINT',om_='MODERATE')
+        f(min(D['CLOSE'],F['EDGE']),sp_='FAST',om_='MODERATE')
+        f(min(D['MEDIUM'],V['FAST_CLOSING']),sp_='SPRINT',om_='MODERATE')
+        f(min(D['MEDIUM'],F['CENTERED']),sp_='SPRINT',om_='SHARP')
+        f(min(D['MEDIUM'],F['PARTIAL']),sp_='FAST',om_='MODERATE')
+        f(min(D['MEDIUM'],F['EDGE']),sp_='FAST',om_='MODERATE')
+        f(min(D['FAR'],V['FAST_CLOSING']),sp_='FAST',om_='GENTLE')
+        f(min(D['FAR'],F['CENTERED']),sp_='FAST',om_='MODERATE')
+        f(min(D['FAR'],F['PARTIAL']),sp_='NORMAL',om_='GENTLE')
+        f(min(D['FAR'],F['EDGE']),sp_='FAST',om_='GENTLE')
+        f(min(D['FAR'],V['RECEDING']),sp_='NORMAL',om_='GENTLE')
+        f(D['VERY_FAR'],sp_='SLOW',om_='NONE')
+        f(F['OUTSIDE'],sp_='FAST',om_='GENTLE')
+        f(min(V['FAST_CLOSING'],F['CENTERED']),sp_='SPRINT',om_='MAX')
+        f(min(D['VERY_FAR'],F['CENTERED']),sp_='NORMAL',om_='GENTLE')
+        f(min(F['CENTERED'],V['STABLE']),sp_='FAST',om_='SHARP')
+        f(min(F['CENTERED'],V['CLOSING']),sp_='SPRINT',om_='MAX')
 
-        # ── Altitude escape rules (unchanged) ─────────────────────────
+        # ── Altitude escape rules ─────────────────────────────────────
         f(Z['MUCH_ABOVE'],vz_='FAST_DIVE')
         f(min(D['CLOSE'],Z['ABOVE']),vz_='DIVE')
         f(min(D['MEDIUM'],Z['ABOVE']),vz_='DIVE')
@@ -158,23 +171,23 @@ class FuzzyEscaper:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  TARGET MOVER  —  v10.2
+#  TARGET MOVER  —  v10.3
 # ═══════════════════════════════════════════════════════════════════════
 class TargetMover:
-    RISE_TO_Z=12.0; RISE_VZ=0.8; RISE_TOLERANCE=0.3; STABILIZE_TIME=3.0; MAX_TIME=300.0
-    Z_FLOOR=10.0; Z_CEIL=20.0; Z_CLAMP_MARGIN=1.5
+    RISE_TO_Z=14.0; RISE_VZ=1.2; RISE_TOLERANCE=0.3; STABILIZE_TIME=1.5; MAX_TIME=300.0
+    Z_FLOOR=12.0; Z_CEIL=24.0; Z_CLAMP_MARGIN=1.5
     SOFT_RADIUS=45.0; HARD_RADIUS=120.0; MAX_REPULSION_OMEGA=15.0
     SAFETY_RADIUS=3.0; BLEND_MAX_DIST=12.0
     STRAIGHT_MAX_DIST=60.0; TRAJ2_SPEED=1.0; TRAJ3_SPEED=3.5
     CIRCLE_R=8.; CIRCLE_T=25.; LEMN_A=8.; LEMN_T=40.
     INCLINE_A_SPEED=2.; INCLINE_A_SLOPE=15.; INCLINE_B_SPEED=3.; INCLINE_B_SLOPE=35.
     HELIX_R=8.; HELIX_T=25.; HELIX_VZ=0.15; HELIX_HALF_TIME=50.
-    OU_THETA=0.40; OU_SIGMA_MAX=0.70; OU_LIMIT=math.pi/3.0; OU_PHI_URGENCY=0.75
+    OU_THETA=0.40; OU_SIGMA_MAX=1.00; OU_LIMIT=math.pi/2.5; OU_PHI_URGENCY=0.75
     FOV_H_HALF=math.radians(32.6); FOV_V_HALF=math.radians(25.6)
     CHASER_MAX_YAW=0.4
-    LAT_A_MIN=math.radians(40.); LAT_A_MAX=math.radians(75.)
+    LAT_A_MIN=math.radians(50.); LAT_A_MAX=math.radians(90.)
     LAT_T_MIN=3.; LAT_T_MAX=7.
-    VERT_B_MIN=0.40; VERT_B_MAX=0.80; VERT_T_MIN=5.; VERT_T_MAX=10.
+    VERT_B_MIN=0.60; VERT_B_MAX=1.20; VERT_T_MIN=4.; VERT_T_MAX=8.
 
     def __init__(self):
         rospy.init_node('target_mover')
@@ -195,16 +208,16 @@ class TargetMover:
         self.hdg_perturb=0.; self._last_phi_high=False
         self._prev_d=None; self._d_dot_ema=0.
 
-        # v10.2: maneuver state machine — 7 axes, distance-adaptive
+        # v10.3: maneuver state machine — 7 axes, phi+distance adaptive
         self._maneuver_timer=0.; self._maneuver_interval=3.0
         self._maneuver_type='VX'
         self._vy_sign=1.0;  self._vy_intensity=1.0;  self._vy_escape=0.
-        self._vz_sign=1.0;  self._vz_intensity=0.8;  self._vz_escape=0.
+        self._vz_sign=1.0;  self._vz_intensity=1.0;  self._vz_escape=0.
 
         self._lat_half_t=0.; self._lat_cycle=0
-        self._lat_A=math.radians(55.); self._lat_T=5.
+        self._lat_A=math.radians(60.); self._lat_T=5.
         self._vert_half_t=0.; self._vert_cycle=0
-        self._vert_B=0.5; self._vert_Tz=7.
+        self._vert_B=0.8; self._vert_Tz=6.
         self._current_weave_offset=0.
 
         self.cmd_pub=rospy.Publisher(
@@ -227,8 +240,8 @@ class TargetMover:
 
         N={1:"Static Hover",2:"Slow Straight",3:"Fast Straight",4:"Circle",
            5:"Lemniscate",6:"Incline Med",7:"Incline Hard",8:"Helix",
-           9:"Fuzzy+Weave v10.2"}
-        rospy.loginfo("[TargetMover] v10.2 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
+           9:"Fuzzy+Weave v10.3"}
+        rospy.loginfo("[TargetMover] v10.3 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
                       % (self.trajectory, N[self.trajectory],
                          self.Z_FLOOR, self.Z_CEIL, self.RISE_TO_Z))
         self.rate=rospy.Rate(50); self._run()
@@ -285,11 +298,11 @@ class TargetMover:
             self.heading=self.yaw; self.speed_ema=0.5; self.vz_ema=0.
             self.hdg_perturb=0.; self._prev_d=None; self._d_dot_ema=0.
             self._lat_half_t=0.; self._lat_cycle=0
-            self._lat_A=math.radians(random.uniform(40,75))
+            self._lat_A=math.radians(random.uniform(50,90))
             self._lat_T=random.uniform(3,7)
             self._vert_half_t=0.; self._vert_cycle=0
-            self._vert_B=random.uniform(.4,.8)
-            self._vert_Tz=random.uniform(5,10)
+            self._vert_B=random.uniform(self.VERT_B_MIN, self.VERT_B_MAX)
+            self._vert_Tz=random.uniform(self.VERT_T_MIN, self.VERT_T_MAX)
         self._traj_init_done=True
 
     def _get_traj_vel(self,elapsed,dt):
@@ -445,7 +458,7 @@ class TargetMover:
         sign=1. if self._vert_cycle%2==0 else -1.
         return sign*self._vert_B*math.sin(phase)
 
-    # ── Fuzzy velocity engine — v10.2 ─────────────────────────────────
+    # ── Fuzzy velocity engine — v10.3 ─────────────────────────────────
     def _compute_fuzzy_velocity(self,dt):
         d      = self._get_3d_distance()
         d_dot  = self._get_closing_rate(d)
@@ -453,14 +466,14 @@ class TargetMover:
         delta_z= self.chaser_world_z - self.world_z
         f_speed, f_omega, f_vz = self.fuzzy.infer(d, d_dot, phi, delta_z)
 
-        # Altitude escape boost when chaser is looking
+        # Altitude escape boost when chaser is looking (v10.3: 1.0→1.3)
         if phi > 0.40:
             au = (phi - .60) / .40
             if abs(delta_z) > .5:
                 ed = -math.copysign(1., delta_z)
             else:
                 ed = 1. if (self.Z_CEIL-self.pos_z) >= (self.pos_z-self.Z_FLOOR) else -1.
-            f_vz = ed * 1.0 * au
+            f_vz = ed * 1.3 * au
 
         # Heading update
         self._update_hdg_perturb(d, dt, phi)
@@ -475,32 +488,39 @@ class TargetMover:
                          self._anti_headon_omega()) * dt
         self.heading = math.atan2(math.sin(self.heading), math.cos(self.heading))
 
-        # ── v10.2: 7-axis maneuver state machine — distance-adaptive ──
+        # ── v10.3: 4-tier distance + phi-urgency adaptive maneuvers ───
         self._maneuver_timer += dt
         if self._maneuver_timer >= self._maneuver_interval:
             self._maneuver_timer = 0.
-            # Distance-adaptive interval and intensity
-            if d < 5.0:
-                self._maneuver_interval = random.uniform(2., 4.)
+            # 4-tier distance-based base interval
+            if d < 3.0:
+                base_int = random.uniform(2.0, 3.0)
                 self._vy_intensity = random.uniform(1.0, 1.5)
-                self._vz_intensity = random.uniform(0.8, 1.2)
-            elif d < 8.0:
-                self._maneuver_interval = random.uniform(2., 5.)
-                self._vy_intensity = random.uniform(1.5, 2.0)
                 self._vz_intensity = random.uniform(1.0, 1.5)
+            elif d < 5.0:
+                base_int = random.uniform(2.5, 4.0)
+                self._vy_intensity = random.uniform(1.2, 1.8)
+                self._vz_intensity = random.uniform(1.2, 1.8)
+            elif d < 8.0:
+                base_int = random.uniform(3.5, 5.5)
+                self._vy_intensity = random.uniform(1.5, 2.5)
+                self._vz_intensity = random.uniform(1.5, 2.5)
             else:
-                self._maneuver_interval = random.uniform(3., 6.)
-                self._vy_intensity = random.uniform(2.0, 3.0)
-                self._vz_intensity = random.uniform(1.2, 2.0)
-            # Pick one of 7 escape axes
+                base_int = random.uniform(4.5, 7.0)
+                self._vy_intensity = random.uniform(2.5, 3.5)
+                self._vz_intensity = random.uniform(1.5, 2.5)
+            # Phi-urgency: faster maneuver changes when chaser has target in FOV
+            phi_factor = 0.6 + 0.7 * (1.0 - phi)
+            self._maneuver_interval = max(0.8, base_int * phi_factor)
+            # Pick escape axis — favour lateral and combined
             types  = ['VX',  'VY',  'VZ',  'VX_VY', 'VY_VZ', 'VX_VZ', 'VX_VY_VZ']
-            weights= [0.08,  0.18,  0.10,   0.22,    0.16,    0.10,    0.16]
+            weights= [0.04,  0.22,  0.10,   0.22,    0.20,    0.08,    0.14]
             self._maneuver_type = random.choices(types, weights=weights)[0]
             self._vy_sign = random.choice([-1., 1.])
             self._vz_sign = random.choice([-1., 1.])
             rospy.loginfo(
-                "[TargetMover] v10.2 Maneuver: %-10s d=%.1fm vy=%+.1f vz=%+.1f int=%.1fs"
-                % (self._maneuver_type, d,
+                "[TargetMover] v10.3 Maneuver: %-10s d=%.1fm phi=%.2f vy=%+.1f vz=%+.1f int=%.1fs"
+                % (self._maneuver_type, d, phi,
                    self._vy_sign * self._vy_intensity,
                    self._vz_sign * self._vz_intensity,
                    self._maneuver_interval))
@@ -511,12 +531,12 @@ class TargetMover:
                       if 'VY' in self._maneuver_type else 0.)
         vz_m_target= (self._vz_sign * self._vz_intensity * phi_scale
                       if 'VZ' in self._maneuver_type else 0.)
-        self._vy_escape += 0.08 * (vy_target    - self._vy_escape)   # ~0.25s ramp
-        self._vz_escape += 0.10 * (vz_m_target  - self._vz_escape)   # ~0.33s ramp
+        self._vy_escape += 0.08 * (vy_target    - self._vy_escape)
+        self._vz_escape += 0.10 * (vz_m_target  - self._vz_escape)
 
-        # Speed: always ≥ 1.0 m/s floor, EMA 0.10 for smooth transitions
+        # Speed: floor 1.0 m/s, clamp 4.0 m/s (v10.3)
         effective_speed = max(f_speed, 1.00)
-        effective_speed = min(effective_speed, 3.5)
+        effective_speed = min(effective_speed, 4.0)
         self.speed_ema += 0.10 * (effective_speed - self.speed_ema)
 
         # Vertical: fuzzy vz + weave + maneuver vz dodge
@@ -526,9 +546,9 @@ class TargetMover:
         # Final velocities
         vx = self.speed_ema * math.cos(self.heading)
         vy = self.speed_ema * math.sin(self.heading) + self._vy_escape
-        vz = self.vz_ema + self._vz_escape   # fuzzy vz + maneuver vz
+        vz = self.vz_ema + self._vz_escape
 
-        # Z safety clamps (after adding vz_escape)
+        # Z safety clamps
         if self.pos_z < self.Z_FLOOR + 0.4 and vz < 0.: vz = 0.20
         if self.pos_z > self.Z_CEIL  - 0.4 and vz > 0.: vz = -0.20
 
@@ -538,10 +558,10 @@ class TargetMover:
         ys = math.copysign(1., he) if abs(he) > 0.01 else 0.
         yr = ys * f_omega * .3 + 1.5 * ye
 
-        # Velocity clamps
-        vx = max(-3.5, min(3.5, vx))
-        vy = max(-3.5, min(3.5, vy))
-        vz = max(-1.5, min(1.5, vz))
+        # Velocity clamps (v10.3: vx/vy 3.5→4.0, vz 1.5→2.0)
+        vx = max(-4.0, min(4.0, vx))
+        vy = max(-4.0, min(4.0, vy))
+        vz = max(-2.0, min(2.0, vz))
         yr = max(-.8,  min(.8,  yr))
 
         # Publish fuzzy state for analyzer

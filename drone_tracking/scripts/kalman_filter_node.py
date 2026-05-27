@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
 """
-kalman_filter_node.py  —  M9.5
+kalman_filter_node.py  —  M9.7
 ================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
 State vector: [cx, cy, alpha, vx, vy, valpha]
 
-M9.5 changes (on top of M9.4):
-  * R_pos: 3.0 → 6.0 for cx/cy
-    The YOLO bounding box "bounces" on a clearly-visible target — raw and
-    filtered jitter were nearly identical (p95 ~22px) meaning M9.4's R=3.0
-    was still passing too much YOLO noise to IBVS.
-    R=6.0 forces the Kalman to trust its prediction more, smoothing the
-    bbox motion and reducing the IBVS vz oscillation caused by cy jitter.
-    Tradeoff: ~1-2 frame lag on very fast target motion. Acceptable since
-    the target's motion is smooth (EMA-ramp maneuver system).
+M9.6 changes (on top of M9.5):
+  * Q_vel cx/cy: 6.0 → 3.0
+    With Q_vel=6.0 the filter explained every YOLO measurement jump as
+    "velocity changed" rather than "noise", causing the filtered cx/cy
+    to track raw measurements almost 1:1 (p50 jitter unchanged after
+    filtering). Halving Q_vel forces the velocity estimate to change
+    more slowly, so the kinematic prediction stays smooth and the
+    correction step actually attenuates measurement noise.
+    Tradeoff: ~0.5-1 frame extra lag on sharp target accelerations —
+    acceptable because the maneuver system ramps via EMA anyway.
+
+  * New topic: /drone_tracking/kalman_velocity  (Point: vx, vy, valpha)
+    Published alongside /drone_tracking/filtered_target so the IBVS
+    SEARCH phase can extrapolate where the target went after loss.
+
+M9.5 changes (preserved):
+  * R_pos: 3.0 → 6.0 for cx/cy — aggressively smooth YOLO bbox bounce
 
 M9.4 changes (preserved):
-  * Q_vel: 4.0 → 6.0  — faster velocity adaptation during acceleration
+  * Q_vel: 4.0 → 6.0  — (now lowered to 3.0 in M9.6)
   * R_pos: 1.0 → 3.0  — (now raised further to 6.0 in M9.5)
-  * PIXEL_JUMP_OUTLIER: 200 → 120 px — catches smaller false positives
-    (grey park objects) while staying above normal fast-tracking max (~60px)
-  * velocity_damping: 0.92 → 0.88 — faster decay during dropout
+  * PIXEL_JUMP_OUTLIER: 200 → 120 px
+  * velocity_damping: 0.92 → 0.88
 
 M9.3 changes (preserved):
   * Position-jump outlier rejection (>120px → reject)
   * MAX_CONSECUTIVE_REJECTIONS: 5 → 8
-  * All M9.2 noise tuning preserved
 """
 
 import rospy
@@ -64,10 +70,10 @@ class KalmanFilterNode:
         self.H[1, 1] = 1
         self.H[2, 2] = 1
 
-        # M9.5: R_pos raised to 6.0 — aggressively smooth YOLO bbox bounce
-        # M9.4: Q_vel raised to 6.0 — faster adaptation during acceleration
+        # M9.6: Q_vel cx/cy 6.0 → 3.0 — smoother cx/cy velocity estimate
+        # M9.5: R_pos raised to 6.0 — smooth YOLO bbox bounce
         self.R = np.diag([6.0, 6.0, 5.0])
-        self.Q = np.diag([0.5, 0.5, 3.0, 6.0, 6.0, 3.0])
+        self.Q = np.diag([0.5, 0.5, 3.0, 5.0, 5.0, 3.0])
 
         # M9.4: faster velocity decay during dropout
         self.velocity_damping = 0.88
@@ -79,11 +85,13 @@ class KalmanFilterNode:
 
         self.pub = rospy.Publisher(
             '/drone_tracking/filtered_target', Point, queue_size=1)
+        self.vel_pub = rospy.Publisher(
+            '/drone_tracking/kalman_velocity', Point, queue_size=1)
         rospy.Subscriber(
             '/drone_tracking/target_center', Point, self.callback)
 
-        rospy.loginfo("[Kalman] M9.5 | R_pos=6.0 R_alpha=5.0 | "
-                      "Q_vel=6.0 | jump=%.0fpx | damp=%.2f"
+        rospy.loginfo("[Kalman] M9.6 | R_pos=6.0 R_alpha=5.0 | Q_vel=5.0 | "
+                      "jump=%.0fpx | damp=%.2f"
                       % (self.PIXEL_JUMP_OUTLIER, self.velocity_damping))
 
     def predict(self):
@@ -204,11 +212,19 @@ class KalmanFilterNode:
         self.x[1] = np.clip(self.x[1], 0.0, 480.0)
         self.x[2] = np.clip(self.x[2], 0.0, 307200.0)
 
+        # Publish filtered position
         out = Point()
         out.x = self.x[0]
         out.y = self.x[1]
         out.z = self.x[2] if not is_dropout else -self.x[2]
         self.pub.publish(out)
+
+        # M9.6: publish velocity state for IBVS SEARCH direction
+        vel = Point()
+        vel.x = float(self.x[3])
+        vel.y = float(self.x[4])
+        vel.z = float(self.x[5])
+        self.vel_pub.publish(vel)
 
 
 if __name__ == '__main__':
