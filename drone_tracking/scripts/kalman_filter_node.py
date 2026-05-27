@@ -67,7 +67,7 @@ class KalmanFilterNode:
         # M9.5: R_pos raised to 6.0 — aggressively smooth YOLO bbox bounce
         # M9.4: Q_vel raised to 6.0 — faster adaptation during acceleration
         self.R = np.diag([6.0, 6.0, 5.0])
-        self.Q = np.diag([2.0, 2.0, 3.0, 6.0, 6.0, 3.0])
+        self.Q = np.diag([0.5, 0.5, 3.0, 6.0, 6.0, 3.0])
 
         # M9.4: faster velocity decay during dropout
         self.velocity_damping = 0.88

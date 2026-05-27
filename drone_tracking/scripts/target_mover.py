@@ -128,11 +128,11 @@ class FuzzyEscaper:
         f(min(D['MEDIUM'],V['FAST_CLOSING']),sp_='SPRINT',om_='MODERATE')  # upgraded from FAST
         f(min(D['MEDIUM'],F['CENTERED']),sp_='SPRINT',om_='SHARP')         # med+centered
         f(min(D['MEDIUM'],F['PARTIAL']),sp_='FAST',om_='MODERATE')         # med+partial: +omega
-        f(min(D['MEDIUM'],F['EDGE']),sp_='NORMAL',om_='MODERATE')          # was SLOW: fixed
+        f(min(D['MEDIUM'],F['EDGE']),sp_='FAST',om_='MODERATE')          # was SLOW: fixed
         f(min(D['FAR'],V['FAST_CLOSING']),sp_='FAST',om_='GENTLE')         # upgraded from NORMAL
         f(min(D['FAR'],F['CENTERED']),sp_='FAST',om_='MODERATE')           # upgraded from NORMAL
         f(min(D['FAR'],F['PARTIAL']),sp_='NORMAL',om_='GENTLE')            # was SLOW: fixed
-        f(min(D['FAR'],F['EDGE']),sp_='NORMAL',om_='GENTLE')               # was SLOW: fixed
+        f(min(D['FAR'],F['EDGE']),sp_='FAST',om_='GENTLE')               # was SLOW: fixed
         f(min(D['FAR'],V['RECEDING']),sp_='NORMAL',om_='GENTLE')           # was SLOW: fixed
         f(D['VERY_FAR'],sp_='SLOW',om_='NONE')                             # ONLY slow: re-engage
         f(F['OUTSIDE'],sp_='FAST',om_='GENTLE')                            # escaped: keep going!
@@ -454,7 +454,7 @@ class TargetMover:
         f_speed, f_omega, f_vz = self.fuzzy.infer(d, d_dot, phi, delta_z)
 
         # Altitude escape boost when chaser is looking
-        if phi > 0.60:
+        if phi > 0.40:
             au = (phi - .60) / .40
             if abs(delta_z) > .5:
                 ed = -math.copysign(1., delta_z)
@@ -483,15 +483,15 @@ class TargetMover:
             if d < 5.0:
                 self._maneuver_interval = random.uniform(2., 4.)
                 self._vy_intensity = random.uniform(1.0, 1.5)
-                self._vz_intensity = random.uniform(0.5, 1.0)
+                self._vz_intensity = random.uniform(0.8, 1.2)
             elif d < 8.0:
                 self._maneuver_interval = random.uniform(2., 5.)
                 self._vy_intensity = random.uniform(1.5, 2.0)
-                self._vz_intensity = random.uniform(0.8, 1.2)
+                self._vz_intensity = random.uniform(1.0, 1.5)
             else:
                 self._maneuver_interval = random.uniform(3., 6.)
                 self._vy_intensity = random.uniform(2.0, 3.0)
-                self._vz_intensity = random.uniform(1.0, 1.5)
+                self._vz_intensity = random.uniform(1.2, 2.0)
             # Pick one of 7 escape axes
             types  = ['VX',  'VY',  'VZ',  'VX_VY', 'VY_VZ', 'VX_VZ', 'VX_VY_VZ']
             weights= [0.08,  0.18,  0.10,   0.22,    0.16,    0.10,    0.16]
@@ -512,7 +512,7 @@ class TargetMover:
         vz_m_target= (self._vz_sign * self._vz_intensity * phi_scale
                       if 'VZ' in self._maneuver_type else 0.)
         self._vy_escape += 0.08 * (vy_target    - self._vy_escape)   # ~0.25s ramp
-        self._vz_escape += 0.06 * (vz_m_target  - self._vz_escape)   # ~0.33s ramp
+        self._vz_escape += 0.10 * (vz_m_target  - self._vz_escape)   # ~0.33s ramp
 
         # Speed: always ≥ 1.0 m/s floor, EMA 0.10 for smooth transitions
         effective_speed = max(f_speed, 1.00)
