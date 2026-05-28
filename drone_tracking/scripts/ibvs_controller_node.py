@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ibvs_controller_node.py  —  v6.24  (2-stage velocity-predicted SEARCH)
+ibvs_controller_node.py  —  v6.25  (2-stage velocity-predicted SEARCH)
 =======================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour

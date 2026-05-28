@@ -104,7 +104,7 @@ def spawn_target_model(sdf_path, x, y, z, yaw):
 def main():
     rospy.init_node('random_spawn_target', anonymous=True)
 
-    zone_name  = rospy.get_param('~zone',   'random')
+    zone_name  = str(rospy.get_param('~zone', 'random'))
     dist       = rospy.get_param('~dist',   -1.0)
     seed       = rospy.get_param('~seed',   -1)
     jitter     = rospy.get_param('~jitter', DEFAULT_JITTER)
