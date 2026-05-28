@@ -2,11 +2,11 @@
 """
 auto_label_v4.py — Auto-label captured frames using YOLO v3
 =============================================================
-Runs YOLO inference on all images in capture_v4/raw/, saves
+Runs YOLO inference on all images in capture_v4/, saves
 YOLO-format .txt label files in capture_v4/labels/.
 
 After running, review labels in labelImg:
-  labelImg ~/drone_detection/capture_v4/raw \
+  labelImg ~/drone_detection/capture_v4 \
            ~/drone_detection/capture_v4/labels/classes.txt \
            ~/drone_detection/capture_v4/labels
 
@@ -22,10 +22,10 @@ def main():
     parser.add_argument('--model', default=os.path.expanduser(
         '~/drone_detection/models/best.pt'))
     parser.add_argument('--input', default=os.path.expanduser(
-        '~/drone_detection/capture_v4/raw'))
+        '~/drone_detection/capture_v4'))
     parser.add_argument('--output', default=os.path.expanduser(
         '~/drone_detection/capture_v4/labels'))
-    parser.add_argument('--conf', type=float, default=0.40,
+    parser.add_argument('--conf', type=float, default=0.35,
                         help='Confidence threshold (default 0.40)')
     parser.add_argument('--batch', type=int, default=32)
     args = parser.parse_args()
