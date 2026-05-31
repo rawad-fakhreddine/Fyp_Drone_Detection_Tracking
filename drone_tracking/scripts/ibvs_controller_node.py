@@ -51,7 +51,7 @@ BODY_VEL_TYPE_MASK = (
 class IBVSController:
     def __init__(self):
         rospy.init_node('ibvs_controller_node')
-        self.USE_PPO = True
+        self.USE_PPO = rospy.get_param("~use_ppo", True)
         self.img_w=640.; self.img_h=480.
         self.img_cx=self.img_w/2.; self.img_cy=self.img_h/2.
         self.area_norm=self.img_w*self.img_h
