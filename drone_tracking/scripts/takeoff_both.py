@@ -3,19 +3,18 @@
 takeoff_both.py — Unified takeoff for chaser + target drones
 =============================================================
 
-v9.8 update (on top of v9.6):
-  TAKEOFF_ALT  1.5 → 7.0m  — both drones climb to near RISE_TO_Z (8m)
-                               so chaser and target start at similar altitude
-  MAX_CLIMB    0.6 → 0.8    — faster climb to reach 7m within timeout
-  Climb timeout 30 → 60s    — extended for higher altitude climb
-  ALT_TOLERANCE 0.25 → 0.40 — slightly wider band for 7m target
-  HOVER_HOLD_S 3.0 → 5.0   — longer altitude convergence
-  Hover phase: vz=0 → P-control on TAKEOFF_ALT (both at exact same height)
+v9.9 update (on top of v9.8):
+  TAKEOFF_ALT  10.0 → 14.0 m  — matches new target_mover v10.3
+                                  RISE_TO_Z=14.0m and Z_FLOOR=12.0m.
+                                  Both drones climb to 14m so the target
+                                  can immediately begin its flight plan
+                                  without a large initial altitude gap.
+  CLIMB_TIMEOUT 120 → 150 s  — extra margin for 14m climb
 
 Arms both drones, enters OFFBOARD mode on both, climbs both to
-TAKEOFF_ALT (7m), then signals ready so IBVS and target_mover
-can take over. target_mover then rises to 8m (RISE_TO_Z) so the
-target starts 1m above the chaser — a natural starting geometry.
+TAKEOFF_ALT (14m), then signals ready so IBVS and target_mover
+can take over. target_mover then rises to RISE_TO_Z (14m) and
+settles for 1.5 s before starting trajectory.
 
 Namespaces:
   Chaser:  /mavros/...                 (default, instance 0)
@@ -43,14 +42,14 @@ LOCAL_VEL_MASK = (
     PositionTarget.IGNORE_YAW
 )
 
-TAKEOFF_ALT   = 10.0    # v9.6: was 1.5 — matches target RISE_TO_Z=8m
-ALT_TOLERANCE = 0.50   # v9.6: was 0.25 — slightly wider band at 7m
+TAKEOFF_ALT   = 14.0    # v9.9: was 10.0 — matches target_mover RISE_TO_Z=14m
+ALT_TOLERANCE = 0.50
 CALM_DURATION = 2.0
 RAMP_DURATION = 1.5
-MAX_CLIMB     = 0.8    # v9.6: was 0.6 — faster climb to reach 7m
+MAX_CLIMB     = 0.8
 XY_P_GAIN     = 0.6
-HOVER_HOLD_S  = 5.0    # v9.8: was 3.0 — longer altitude convergence
-CLIMB_TIMEOUT = 120.0   # v9.6: was 30.0 — extended for 7m climb
+HOVER_HOLD_S  = 5.0
+CLIMB_TIMEOUT = 150.0   # v9.9: extended for 14m climb
 
 
 class DroneHandle:
@@ -270,7 +269,6 @@ class TakeoffBoth:
                     % (CLIMB_TIMEOUT, self.chaser.altitude, self.target.altitude))
                 return False
 
-            # Progress log every 5s
             rospy.loginfo_throttle(5,
                 "[TakeoffBoth] Climbing... chaser=%.1fm target=%.1fm (target=%.1fm)"
                 % (self.chaser.altitude, self.target.altitude, TAKEOFF_ALT))
@@ -290,8 +288,7 @@ class TakeoffBoth:
         while not rospy.is_shutdown():
             if (rospy.Time.now() - t0).to_sec() >= HOVER_HOLD_S:
                 break
-            # v9.8: P-control on altitude — hold BOTH at exactly TAKEOFF_ALT
-            # (old code used vz=0 which let drones drift at different heights)
+            # P-control on altitude — hold BOTH at exactly TAKEOFF_ALT
             vx_c, vy_c, _ = self.chaser.climb_vel(0.0)
             vz_c = max(-0.3, min(0.3, 0.5 * (TAKEOFF_ALT - self.chaser.altitude)))
             self.chaser.send_vel(vx_c, vy_c, vz_c)

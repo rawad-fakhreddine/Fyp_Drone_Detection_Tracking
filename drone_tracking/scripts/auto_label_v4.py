@@ -22,7 +22,7 @@ def main():
     parser.add_argument('--model', default=os.path.expanduser(
         '~/drone_detection/models/best.pt'))
     parser.add_argument('--input', default=os.path.expanduser(
-        '~/drone_detection/capture_v4'))
+        '~/drone_detection/capture_v4/raw/images'))
     parser.add_argument('--output', default=os.path.expanduser(
         '~/drone_detection/capture_v4/labels'))
     parser.add_argument('--conf', type=float, default=0.35,
