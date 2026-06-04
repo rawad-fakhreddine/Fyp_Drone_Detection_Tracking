@@ -52,6 +52,7 @@ class IBVSController:
     def __init__(self):
         rospy.init_node('ibvs_controller_node')
         self.USE_PPO = rospy.get_param("~use_ppo", True)
+        self.detection_source = rospy.get_param("~detection_source", "kalman")  # 'kalman' or 'raw'
         self.img_w=640.; self.img_h=480.
         self.img_cx=self.img_w/2.; self.img_cy=self.img_h/2.
         self.area_norm=self.img_w*self.img_h
@@ -105,7 +106,9 @@ class IBVSController:
         self.cmd_pub=rospy.Publisher('/mavros/setpoint_raw/local',PositionTarget,queue_size=1)
         self.active_pub=rospy.Publisher('/drone_tracking/ibvs_active',Bool,queue_size=1)
         self.phase_pub=rospy.Publisher('/drone_tracking/ibvs_phase',String,queue_size=1)
-        rospy.Subscriber('/drone_tracking/filtered_target',Point,self.detection_cb,queue_size=1)
+        det_topic = '/drone_tracking/filtered_target' if self.detection_source == 'kalman' else '/drone_tracking/target_center'
+        rospy.Subscriber(det_topic, Point, self.detection_cb, queue_size=1)
+        rospy.loginfo("[IBVS] detection_source=%s (subscribing to %s)" % (self.detection_source, det_topic))
         rospy.Subscriber('/drone_tracking/kalman_velocity',Point,self.kf_vel_cb,queue_size=1)
         rospy.Subscriber('/drone_tracking/ibvs_setpoints',Quaternion,self.setpoints_cb,queue_size=1)
         rospy.Subscriber('/mavros/state',State,self.state_cb,queue_size=1)

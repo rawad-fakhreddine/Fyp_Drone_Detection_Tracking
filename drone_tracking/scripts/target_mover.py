@@ -192,6 +192,10 @@ class TargetMover:
     def __init__(self):
         rospy.init_node('target_mover')
         self.trajectory=int(rospy.get_param('~trajectory',9))
+        seed = rospy.get_param('~seed', -1)
+        if seed >= 0:
+            random.seed(int(seed))
+            rospy.loginfo("[TargetMover] Seeded with %d" % int(seed))
         if self.trajectory not in range(1,10): self.trajectory=9
         self.fuzzy=FuzzyEscaper()
         self.pos_x=self.pos_y=self.pos_z=0.; self.yaw=0.; self.got_pose=False

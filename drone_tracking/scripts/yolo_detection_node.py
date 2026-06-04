@@ -22,7 +22,7 @@ import rospy
 from collections import deque
 import numpy as np
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Quaternion
 from cv_bridge import CvBridge
 from ultralytics import YOLO
 
@@ -46,6 +46,8 @@ class YoloNode:
 
         self.pub = rospy.Publisher(
             '/drone_tracking/target_center', Point, queue_size=1)
+        self.box_pub = rospy.Publisher(
+            '/drone_tracking/target_box', Quaternion, queue_size=1)
         rospy.Subscriber(
             '/iris/usb_cam/image_raw', Image, self.callback, queue_size=1)
 
@@ -85,6 +87,9 @@ class YoloNode:
             p.x = raw_cx        # centroid X — unsmoothed, Kalman handles it
             p.y = raw_cy        # centroid Y — unsmoothed, Kalman handles it
             p.z = smooth_alpha  # bbox area  — median-smoothed here
+            # Publish actual w,h for debug viewer (other nodes unaffected)
+            self.box_pub.publish(Quaternion(x=raw_cx, y=raw_cy,
+                z=float(x2-x1), w=float(y2-y1)))
 
         else:
             # No detection — clear buffer so old values don't contaminate

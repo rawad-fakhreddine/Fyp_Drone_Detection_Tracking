@@ -112,14 +112,17 @@ def main():
     if seed >= 0:
         random.seed(seed)
 
-    # Pick zone
+    ALLOWED_ZONES = ['5', '6', '7', '9']  # ablation matrix uses these only
     if zone_name == 'random':
-        zone_key = random.choice(list(SPAWN_ZONES.keys()))
+        zone_key = random.choice(ALLOWED_ZONES)
+    elif zone_name in ALLOWED_ZONES:
+        zone_key = zone_name
     elif zone_name in SPAWN_ZONES:
-        zone_key = zone_name.upper()
+        rospy.logwarn("[RandomSpawn] Zone %s outside ablation set {5,6,7,9}, allowing it anyway" % zone_name)
+        zone_key = zone_name
     else:
-        rospy.logwarn("[RandomSpawn] Unknown zone '%s', picking random" % zone_name)
-        zone_key = random.choice(list(SPAWN_ZONES.keys()))
+        rospy.logwarn("[RandomSpawn] Unknown zone '%s', picking from {5,6,7,9}" % zone_name)
+        zone_key = random.choice(ALLOWED_ZONES)
 
     cx, cy, desc = SPAWN_ZONES[zone_key]
 
