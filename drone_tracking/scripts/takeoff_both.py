@@ -3,6 +3,17 @@
 takeoff_both.py — Unified takeoff for chaser + target drones
 =============================================================
 
+v10.0 update (on top of v9.9) — sequencing-crash fixes (2026-06-11):
+  ARM_ATTEMPTS  10 → 40       — PX4 rejects arming until the EKF re-aligns
+                                  after the T2 zone teleport; 10 attempts
+                                  (~5 s sim) gave up too early. 40 (~20 s sim)
+                                  rides out alignment. launch_stack also gates
+                                  on sim time >= 25 s before starting us.
+  Disarm on abort             — if arming ultimately fails, DISARM whichever
+                                  drone did arm. Previously an armed target
+                                  was abandoned with no setpoint stream and
+                                  tipped over on the pad.
+
 v9.9 update (on top of v9.8):
   TAKEOFF_ALT  10.0 → 14.0 m  — matches new target_mover v10.3
                                   RISE_TO_Z=14.0m and Z_FLOOR=12.0m.
@@ -50,6 +61,7 @@ MAX_CLIMB     = 0.8
 XY_P_GAIN     = 0.6
 HOVER_HOLD_S  = 5.0
 CLIMB_TIMEOUT = 150.0   # v9.9: extended for 14m climb
+ARM_ATTEMPTS  = 40      # v10.0: ~20 s sim — outlasts EKF re-alignment after teleport
 
 
 class DroneHandle:
@@ -203,7 +215,7 @@ class TakeoffBoth:
         self._pre_arm_stream(CALM_DURATION)
 
         rospy.loginfo("[TakeoffBoth] Arming both drones...")
-        for attempt in range(10):
+        for attempt in range(ARM_ATTEMPTS):
             if not self.chaser.armed: self.chaser.arm()
             if not self.target.armed: self.target.arm()
             for _ in range(10):
@@ -218,6 +230,14 @@ class TakeoffBoth:
         if not self.chaser.armed or not self.target.armed:
             rospy.logerr("[TakeoffBoth] Failed to arm! chaser=%s target=%s" %
                          (self.chaser.armed, self.target.armed))
+            # v10.0: never leave one drone armed on an aborted takeoff — an
+            # armed drone with no setpoint stream tips over on the pad.
+            try:
+                if self.chaser.armed: self.chaser.arm_srv(False)
+                if self.target.armed: self.target.arm_srv(False)
+                rospy.logwarn("[TakeoffBoth] Aborted — both drones disarmed")
+            except rospy.ServiceException as e:
+                rospy.logwarn("[TakeoffBoth] Abort disarm failed: %s" % e)
             return False
 
         self.chaser.lock_origin()

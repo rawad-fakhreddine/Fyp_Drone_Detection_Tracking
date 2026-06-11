@@ -5,6 +5,11 @@ flight_logger.py — M9.3
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
+M9.6 (B5): logging rate 4 Hz -> 10 Hz (denser sampling for the derivative-noise
+  metrics in the Q sweep). Logger is now launched BEFORE takeoff_both so the
+  TAKEOFF phase and early SEARCH are captured. No rate-dependent logic exists
+  (every column is an instantaneous sample), so the rate change is safe.
+
 M9.3 addition (on top of M8.2):
   - world_alt_err = chaser_wz - target_wz  (Gazebo world frame)
     Replaces the broken cross-frame MAVROS alt_err (pos_z - target_pz)
@@ -129,8 +134,8 @@ class FlightLogger:
         rospy.Subscriber('/gazebo/model_states',           ModelStates,      self.gazebo_cb,      queue_size=1)
         rospy.Subscriber('/drone_tracking/target_fuzzy_state', Float32MultiArray, self.fuzzy_cb,  queue_size=1)
 
-        self.rate = rospy.Rate(4)
-        rospy.loginfo("[FlightLogger] M9.3 started (4 Hz) | CSV: %s" % self.csv_path)
+        self.rate = rospy.Rate(10)
+        rospy.loginfo("[FlightLogger] M9.3 started (10 Hz, B5) | CSV: %s" % self.csv_path)
         self.run()
 
     # ── Callbacks ────────────────────────────────────────────────────

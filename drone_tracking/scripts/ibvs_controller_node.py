@@ -116,7 +116,7 @@ class IBVSController:
         rospy.Subscriber('/drone_tracking/takeoff_ready',Bool,self.takeoff_ready_cb,queue_size=1)
 
         self.dt=1./20.; self.rate=rospy.Rate(20)
-        rospy.loginfo("[IBVS] v6.22 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f"
+        rospy.loginfo("[IBVS] v6.25 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f"
                       %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE))
         self.run()
 

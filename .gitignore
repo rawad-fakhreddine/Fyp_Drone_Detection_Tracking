@@ -14,3 +14,4 @@ capture*/
 v3_*/
 v4_*/
 flight_log*.csv
+*.bak_*

@@ -45,4 +45,8 @@ done
 rm -rf ~/.gazebo/log/* 2>/dev/null
 pkill -9 -f gazebo 2>/dev/null
 
+# B8: log hygiene — purge ROS logs + delete old per-run /tmp logs (>7 days)
+rosclean purge -y >/dev/null 2>&1
+find /tmp -maxdepth 1 -name 'T*_zone*' -mtime +7 -delete 2>/dev/null
+
 echo "[cleanup] done — stack down, ports checked"

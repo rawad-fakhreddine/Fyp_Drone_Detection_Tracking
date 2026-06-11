@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-random_spawn_target.py — v3.0: Exact GPS-surveyed spawn zones
+random_spawn_target.py — v3.1: Exact GPS-surveyed spawn zones
+
+v3.1 changes (2026-06-11):
+  - Default start distance 3-6m → 8-12m (chaser lost the target the moment
+    the mover started: at 3-6m an 8m-radius orbit sweeps across the FOV
+    faster than the chaser can yaw; ~dist still overrides)
 =====================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
@@ -132,8 +137,9 @@ def main():
     chaser_z   = SPAWN_Z
     chaser_yaw = random.uniform(-math.pi, math.pi)
 
-    # Target: 3-6m in front of chaser
-    target_dist    = dist if dist >= 0 else random.uniform(3.0, 6.0)
+    # Target: 8-12m in front of chaser (v3.1; was 3-6m — too close, immediate
+    # FOV loss when the mover starts)
+    target_dist    = dist if dist >= 0 else random.uniform(8.0, 12.0)
     lateral_offset = random.uniform(-1.5, 1.5)
     target_x = chaser_x + target_dist * math.cos(chaser_yaw) + \
                lateral_offset * math.sin(chaser_yaw)
@@ -155,7 +161,7 @@ def main():
 
     rospy.loginfo("")
     rospy.loginfo("=" * 65)
-    rospy.loginfo("[RandomSpawn] v3.0 | Zone %s: %s" % (zone_key, desc))
+    rospy.loginfo("[RandomSpawn] v3.1 | Zone %s: %s" % (zone_key, desc))
     rospy.loginfo("=" * 65)
     rospy.loginfo("  Chaser:  x=%.1f  y=%.1f  z=%.1f  yaw=%.0f deg"
                   % (chaser_x, chaser_y, chaser_z, math.degrees(chaser_yaw)))

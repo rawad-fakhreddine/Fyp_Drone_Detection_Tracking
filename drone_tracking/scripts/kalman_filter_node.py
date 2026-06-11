@@ -7,17 +7,7 @@ Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
 State vector: [cx, cy, alpha, vx, vy, valpha]
 
-M9.6 changes (on top of M9.5):
-  * Q_vel cx/cy: 6.0 → 3.0
-    With Q_vel=6.0 the filter explained every YOLO measurement jump as
-    "velocity changed" rather than "noise", causing the filtered cx/cy
-    to track raw measurements almost 1:1 (p50 jitter unchanged after
-    filtering). Halving Q_vel forces the velocity estimate to change
-    more slowly, so the kinematic prediction stays smooth and the
-    correction step actually attenuates measurement noise.
-    Tradeoff: ~0.5-1 frame extra lag on sharp target accelerations —
-    acceptable because the maneuver system ramps via EMA anyway.
-
+M9.8 changes (on top of M9.5):
   * New topic: /drone_tracking/kalman_velocity  (Point: vx, vy, valpha)
     Published alongside /drone_tracking/filtered_target so the IBVS
     SEARCH phase can extrapolate where the target went after loss.
@@ -26,7 +16,7 @@ M9.5 changes (preserved):
   * R_pos: 3.0 → 6.0 for cx/cy — aggressively smooth YOLO bbox bounce
 
 M9.4 changes (preserved):
-  * Q_vel: 4.0 → 6.0  — (now lowered to 3.0 in M9.6)
+  * Q_vel: 4.0 → 6.0
   * R_pos: 1.0 → 3.0  — (now raised further to 6.0 in M9.5)
   * PIXEL_JUMP_OUTLIER: 200 → 120 px
   * velocity_damping: 0.92 → 0.88
@@ -70,7 +60,7 @@ class KalmanFilterNode:
         self.H[1, 1] = 1
         self.H[2, 2] = 1
 
-        # M9.6: Q_vel cx/cy 6.0 → 3.0 — smoother cx/cy velocity estimate
+        # M9.8: Q_vel cx/cy = 6.0 — responsive to fast target motion
         # M9.5: R_pos raised to 6.0 — smooth YOLO bbox bounce
         self.R = np.diag([6.0, 6.0, 5.0])
         self.Q = np.diag([0.5, 0.5, 3.0, 6.0, 6.0, 3.0])
@@ -90,7 +80,7 @@ class KalmanFilterNode:
         rospy.Subscriber(
             '/drone_tracking/target_center', Point, self.callback)
 
-        rospy.loginfo("[Kalman] M9.6 | R_pos=6.0 R_alpha=5.0 | Q_vel=6.0 | "
+        rospy.loginfo("[Kalman] M9.8 | R_pos=6.0 R_alpha=5.0 | Q_vel=6.0 | "
                       "jump=%.0fpx | damp=%.2f"
                       % (self.PIXEL_JUMP_OUTLIER, self.velocity_damping))
 

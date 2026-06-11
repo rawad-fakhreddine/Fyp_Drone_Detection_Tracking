@@ -1,18 +1,33 @@
 #!/usr/bin/env python3
 """
-target_mover.py  —  v10.5  Speed [1,3.5] + Phi-Adaptive Maneuvers
+target_mover.py  —  v10.6  Speed [1.0,3.5] + Phi-Adaptive Maneuvers
 =====================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
+v10.6 changes (on top of v10.5):
+  B1 — fuzzy altitude-escape boost was INVERTED. It fired at phi>0.40, but its
+       gain au=(phi-.60)/.40 is negative for phi in (0.40,0.60), so it drove the
+       target TOWARD the chaser's altitude AND overwrote all 9 fuzzy altitude
+       rules. Threshold raised to phi>0.60 (au now in [0,1]); for phi<=0.60 the
+       fuzzy vz rules apply untouched. Deliberate behaviour change.
+  SPRINT MF rescale finished: the sampled speed universe _SP is [1.0,3.5], but
+       SPRINT was trap(3.20,3.60,4.00,4.00) — its plateau (3.6–4.0) sat OUTSIDE
+       the universe, so its max membership inside [1.0,3.5] was only 0.75,
+       silently capping top escape speed. Now SPRINT=trap(3.00,3.35,3.50,3.50);
+       FAST tri(2.10,2.80,3.50) already fit. (v10.5 intent was "[1,4]→[1,3.5],
+       MFs rescaled" but only the universe was rescaled — this finishes it.)
+  NOTE: the T9 baseline RESETS after v10.6 (B1 + SPRINT change behaviour) — re-run
+       the 2×T9 {42,43} stress baseline before any comparison.
+
 v10.3 changes (on top of v10.2):
-  SPEED RANGE [1.0 → 4.0 m/s]:
-    Universe shifted from [0.5, 3.5] to [1.0, 4.0].
-    Floor stays at 1.0 (universe minimum). Clamp at 4.0.
-    MFs: SLOW  tri(1.00,1.20,1.50)  — near floor
+  SPEED RANGE [1.0 → 3.5 m/s]:
+    Universe is the sampled array _SP = [1.0, 3.5] (61 points). Defuzzified
+    output additionally clamped at 3.5. Floor stays at 1.0 (universe minimum).
+    MFs (v10.6): SLOW  tri(1.00,1.20,1.50)  — near floor
          NORMAL tri(1.30,1.80,2.30)
          FAST   tri(2.10,2.80,3.50)
-         SPRINT trap(3.20,3.60,4.00,4.00)
+         SPRINT trap(3.00,3.35,3.50,3.50)  — v10.6: rescaled to fit [1.0,3.5]
     Note: high omega rules allow large heading changes; this naturally
     caps net ground displacement while keeping the chaser challenged.
 
@@ -67,10 +82,10 @@ VEL_YR_MASK = (
     PositionTarget.IGNORE_YAW)
 
 # ═══════════════════════════════════════════════════════════════════════
-#  FUZZY ESCAPER  —  v10.3  (speed universe [1.0, 4.0])
+#  FUZZY ESCAPER  —  v10.6  (speed universe [1.0, 3.5])
 # ═══════════════════════════════════════════════════════════════════════
 class FuzzyEscaper:
-    _SP=[1.00+i*2.5/60 for i in range(61)]   # [1.0 .. 4.0]
+    _SP=[1.00+i*2.5/60 for i in range(61)]   # [1.0 .. 3.5]
     _OM=[0.00+i*1.20/60 for i in range(61)]
     _VZ=[-1.00+i*2./60 for i in range(61)]
     @staticmethod
@@ -104,9 +119,9 @@ class FuzzyEscaper:
                 'MUCH_BELOW':t(dz,-1e9,-1e9,-5,-3)}
     def _mf_speed(s,v,t):
         T,R=s._trap,s._tri
-        # v10.3: speed universe [1.0, 4.0]
+        # v10.6: speed universe [1.0, 3.5]; SPRINT rescaled to fit (was 3.2,3.6,4,4)
         return {'SLOW':R(v,1.00,1.20,1.50),'NORMAL':R(v,1.30,1.80,2.30),
-                'FAST':R(v,2.10,2.80,3.50),'SPRINT':T(v,3.20,3.60,4.00,4.00)}[t]
+                'FAST':R(v,2.10,2.80,3.50),'SPRINT':T(v,3.00,3.35,3.50,3.50)}[t]
     def _mf_omega(s,v,t):
         T,R=s._trap,s._tri
         return {'NONE':T(v,0,0,.05,.12),'GENTLE':R(v,.08,.20,.35),
@@ -171,7 +186,7 @@ class FuzzyEscaper:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-#  TARGET MOVER  —  v10.3
+#  TARGET MOVER  —  v10.6
 # ═══════════════════════════════════════════════════════════════════════
 class TargetMover:
     RISE_TO_Z=14.0; RISE_VZ=1.2; RISE_TOLERANCE=0.3; STABILIZE_TIME=1.5; MAX_TIME=300.0
@@ -203,6 +218,7 @@ class TargetMover:
         self.world_x=self.world_y=self.world_z=0.
         self.chaser_world_x=self.chaser_world_y=self.chaser_world_z=0.
         self._got_world_pos=False
+        self._warned_no_world_pos=False   # B6: warn-once guard
         self.phase="WAITING"; self.takeoff_ready=False; self.chaser_phase="UNKNOWN"
         self.rise_start_time=self.settle_start_time=self.motion_start_time=None
         self._traj_init_done=False; self._traj_azimuth=self._traj_phase0=0.
@@ -212,7 +228,7 @@ class TargetMover:
         self.hdg_perturb=0.; self._last_phi_high=False
         self._prev_d=None; self._d_dot_ema=0.
 
-        # v10.3: maneuver state machine — 7 axes, phi+distance adaptive
+        # v10.6: maneuver state machine — 7 axes, phi+distance adaptive
         self._maneuver_timer=0.; self._maneuver_interval=3.0
         self._maneuver_type='VX'
         self._vy_sign=1.0;  self._vy_intensity=1.0;  self._vy_escape=0.
@@ -244,8 +260,8 @@ class TargetMover:
 
         N={1:"Static Hover",2:"Slow Straight",3:"Fast Straight",4:"Circle",
            5:"Lemniscate",6:"Incline Med",7:"Incline Hard",8:"Helix",
-           9:"Fuzzy+Weave v10.3"}
-        rospy.loginfo("[TargetMover] v10.3 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
+           9:"Fuzzy+Weave v10.6"}
+        rospy.loginfo("[TargetMover] v10.6 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
                       % (self.trajectory, N[self.trajectory],
                          self.Z_FLOOR, self.Z_CEIL, self.RISE_TO_Z))
         self.rate=rospy.Rate(50); self._run()
@@ -282,6 +298,16 @@ class TargetMover:
             self.world_x=p.x; self.world_y=p.y; self.world_z=p.z
             self._got_world_pos=True
         except: pass
+        # B6: the matching above is silent on failure. If the target world pose
+        # never resolves, the fuzzy escaper computes distance from zeros. Warn
+        # ONCE if still unresolved ~5s into MOVING (matching logic unchanged).
+        if (not self._got_world_pos and not self._warned_no_world_pos
+                and self.phase=="MOVING" and self.motion_start_time is not None
+                and (rospy.Time.now()-self.motion_start_time).to_sec() > 5.0):
+            self._warned_no_world_pos=True
+            rospy.logwarn("[TargetMover] No world pose for target_iris/iris from "
+                          "/gazebo/model_states — fuzzy distance invalid. "
+                          "Check model names.")
 
     def send_vel(self,vx=0.,vy=0.,vz=0.,yr=0.):
         m=PositionTarget(); m.header.stamp=rospy.Time.now()
@@ -462,7 +488,7 @@ class TargetMover:
         sign=1. if self._vert_cycle%2==0 else -1.
         return sign*self._vert_B*math.sin(phase)
 
-    # ── Fuzzy velocity engine — v10.3 ─────────────────────────────────
+    # ── Fuzzy velocity engine — v10.6 ─────────────────────────────────
     def _compute_fuzzy_velocity(self,dt):
         d      = self._get_3d_distance()
         d_dot  = self._get_closing_rate(d)
@@ -470,14 +496,18 @@ class TargetMover:
         delta_z= self.chaser_world_z - self.world_z
         f_speed, f_omega, f_vz = self.fuzzy.infer(d, d_dot, phi, delta_z)
 
-        # Altitude escape boost when chaser is looking (v10.3: 1.0→1.3)
-        if phi > 0.40:
+        # Altitude escape boost when chaser clearly has us in FOV.
+        # B1 FIX (was phi>0.40): with the 0.40 threshold, au=(phi-.60)/.40 was
+        # NEGATIVE for phi in (0.40,0.60), flipping the escape direction TOWARD
+        # the chaser AND overwriting all 9 fuzzy altitude rules. Threshold 0.60
+        # makes au in [0,1]; for phi<=0.60 the fuzzy vz rules apply untouched.
+        if phi > 0.60:
             au = (phi - .60) / .40
             if abs(delta_z) > .5:
                 ed = -math.copysign(1., delta_z)
             else:
                 ed = 1. if (self.Z_CEIL-self.pos_z) >= (self.pos_z-self.Z_FLOOR) else -1.
-            f_vz = ed * 1.3 * au
+            f_vz = ed * 1.3 * au                  # overwrite only when boost active
 
         # Heading update
         self._update_hdg_perturb(d, dt, phi)
@@ -492,7 +522,7 @@ class TargetMover:
                          self._anti_headon_omega()) * dt
         self.heading = math.atan2(math.sin(self.heading), math.cos(self.heading))
 
-        # ── v10.3: 4-tier distance + phi-urgency adaptive maneuvers ───
+        # ── v10.6: 4-tier distance + phi-urgency adaptive maneuvers ───
         self._maneuver_timer += dt
         if self._maneuver_timer >= self._maneuver_interval:
             self._maneuver_timer = 0.
@@ -523,7 +553,7 @@ class TargetMover:
             self._vy_sign = random.choice([-1., 1.])
             self._vz_sign = random.choice([-1., 1.])
             rospy.loginfo(
-                "[TargetMover] v10.3 Maneuver: %-10s d=%.1fm phi=%.2f vy=%+.1f vz=%+.1f int=%.1fs"
+                "[TargetMover] v10.6 Maneuver: %-10s d=%.1fm phi=%.2f vy=%+.1f vz=%+.1f int=%.1fs"
                 % (self._maneuver_type, d, phi,
                    self._vy_sign * self._vy_intensity,
                    self._vz_sign * self._vz_intensity,
@@ -538,7 +568,7 @@ class TargetMover:
         self._vy_escape += 0.08 * (vy_target    - self._vy_escape)
         self._vz_escape += 0.10 * (vz_m_target  - self._vz_escape)
 
-        # Speed: floor 1.0 m/s, clamp 4.0 m/s (v10.3)
+        # Speed: floor 1.0 m/s, clamp 3.5 m/s (v10.6)
         effective_speed = max(f_speed, 1.00)
         effective_speed = min(effective_speed, 3.5)
         self.speed_ema += 0.10 * (effective_speed - self.speed_ema)
@@ -562,7 +592,7 @@ class TargetMover:
         ys = math.copysign(1., he) if abs(he) > 0.01 else 0.
         yr = ys * f_omega * .3 + 1.5 * ye
 
-        # Velocity clamps (v10.3: vx/vy 3.5→4.0, vz 1.5→2.0)
+        # Velocity clamps (v10.6: vx/vy ±3.5, vz ±2.0)
         vx = max(-3.5, min(3.5, vx))
         vy = max(-3.5, min(3.5, vy))
         vz = max(-2.0, min(2.0, vz))
