@@ -14,8 +14,18 @@ M9.6 (B3, B9):
   compatibility. On a header mismatch the row is diverted to summary_v2.csv
   rather than corrupting existing rows.
 
+M9.6 step 3 (IBVS v6.26 guard + watchdog protocol), appended at END like B9:
+  * emergency_brake_pct   — % of mission rows (SEARCH/APPROACH/HOLD) with
+                            emerg=1 ('' if the CSV predates the column)
+  * emergency_brake_count — number of distinct engagements (0->1 transitions)
+  * aborted               — '1' if the run was cut by the loss watchdog
+                            (passed by launch_stack via --aborted)
+  * mission_duration_s    — actual logged sim-time span (last - first
+                            sim_time row); makes HOLD% comparable across
+                            aborted/full runs of different lengths
+
 Usage:
-  python3 extract_metrics.py --csv PATH --config N --zone Z --traj T --seed S --duration D
+  python3 extract_metrics.py --csv PATH --config N --zone Z --traj T --seed S --duration D [--aborted 0|1]
 """
 import os, sys, csv, argparse, datetime
 import numpy as np
@@ -28,6 +38,7 @@ def main():
     ap.add_argument('--traj',     required=True, type=int)
     ap.add_argument('--seed',     required=True, type=int)
     ap.add_argument('--duration', required=True, type=int)
+    ap.add_argument('--aborted',  type=int, default=0)   # 1 = cut by loss watchdog
     ap.add_argument('--summary',  default=os.path.expanduser("~/fyp/Results/summary.csv"))
     args = ap.parse_args()
 
@@ -96,6 +107,27 @@ def main():
     # cur_start still set here => last episode open at EOF => ignored
     mean_recovery_time_s = float(np.mean(episodes)) if episodes else float('nan')
 
+    # ── M9.6 step 3: v6.26 emergency brake stats (mission rows only) ─────────
+    has_emerg = 'emerg' in rows[0]
+    mission = [r for r in rows if r.get('phase','') in ('SEARCH','APPROACH','HOLD')]
+    if has_emerg and mission:
+        n_emerg = sum(1 for r in mission if r.get('emerg','') == '1')
+        emergency_brake_pct = round(100.0 * n_emerg / len(mission), 2)
+        # distinct engagements = 0->1 transitions over the full row sequence
+        emergency_brake_count = 0
+        prev = '0'
+        for r in rows:
+            cur = r.get('emerg', '0')
+            if cur == '1' and prev != '1': emergency_brake_count += 1
+            prev = cur
+    else:
+        emergency_brake_pct = ''      # CSV predates the emerg column
+        emergency_brake_count = ''
+
+    # ── M9.6 step 3: actual logged sim-time span (abort visibility) ─────────
+    times = [t for t in (fnum(r, 'sim_time') for r in rows) if t is not None]
+    mission_duration_s = round(max(times) - min(times), 1) if times else ''
+
     def _opt(x, nd):
         return round(x, nd) if not np.isnan(x) else ''
 
@@ -120,6 +152,11 @@ def main():
         'pred_rate':            round(pct(flt_predict),  2),
         'mean_recovery_time_s': _opt(mean_recovery_time_s, 2),
         'wrong_direction_pct':  _opt(wrong_direction_pct,  2),
+        # ── M9.6 step 3 columns (appended at END for backward compatibility) ──
+        'emergency_brake_pct':   emergency_brake_pct,
+        'emergency_brake_count': emergency_brake_count,
+        'aborted':               args.aborted,
+        'mission_duration_s':    mission_duration_s,
     }
 
     fieldnames = list(metrics.keys())

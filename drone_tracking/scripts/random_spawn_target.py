@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 """
-random_spawn_target.py — v3.1: Exact GPS-surveyed spawn zones
+random_spawn_target.py — v3.2: Exact GPS-surveyed spawn zones
+
+v3.2 changes (2026-06-11, PRE-BASELINE then LOCKED):
+  - Zone 7 initial-acquisition geometry: during the T7 stress run YOLO
+    latched a tree-line false positive. Zone 7 center moved (-45,-170) ->
+    (-45,-130): >= 42 m from the y=-180 land edge even at full -8 m jitter
+    (was 2 m at worst). Zone 7 spawn yaw now constrained to face the island
+    interior (east, +Y): yaw = pi/2 +- 40 deg via CLEAR_VIEW_YAW, so the
+    initial 8-12 m view of the target has open ground/sky behind it.
+    The yaw draw COUNT is unchanged (the same uniform(-pi,pi) draw is
+    remapped into the sector), so zones 5/6/9 spawns are identical per seed.
+    Trees remain in the wider flight space — only initial acquisition is
+    cleaned up.
 
 v3.1 changes (2026-06-11):
   - Default start distance 3-6m → 8-12m (chaser lost the target the moment
@@ -54,9 +66,18 @@ SPAWN_ZONES = {
     '4': (-350,      35,  "Zone 4 — far north"),
     '5': (-305,     -75,  "Zone 5 — far northwest"),
     '6': (-200,    -115,  "Zone 6 — west"),
-    '7': (  -45,   -170,  "Zone 7 — southwest"),
+    '7': (  -45,   -130,  "Zone 7 — southwest (v3.2: moved off the y=-180 edge)"),
     '8': (  100,   -285,  "Zone 8 — far south"),
     '9': (  260,   -165,  "Zone 9 — southeast"),
+}
+
+# v3.2: per-zone clear-view spawn yaw (center_rad, half_width_rad).
+# The chaser looks at the target 8-12 m ahead, so the BACKDROP of the initial
+# view is what matters: constrain yaw toward open ground/sky, away from the
+# nearest tree line. Zone 7: face east (+Y, island interior; the western
+# y=-180 edge with its tree line stays behind the chaser).
+CLEAR_VIEW_YAW = {
+    '7': (math.pi / 2.0, math.radians(40)),
 }
 
 # Jitter reduced from ±15m to ±8m — prevents drift toward water edges
@@ -135,7 +156,14 @@ def main():
     chaser_x   = cx + random.uniform(-jitter, jitter)
     chaser_y   = cy + random.uniform(-jitter, jitter)
     chaser_z   = SPAWN_Z
-    chaser_yaw = random.uniform(-math.pi, math.pi)
+    # v3.2: same single draw for every zone (keeps per-seed reproducibility of
+    # the other zones); clear-view zones remap it into their allowed sector.
+    yaw_draw = random.uniform(-math.pi, math.pi)
+    if zone_key in CLEAR_VIEW_YAW:
+        clear, half = CLEAR_VIEW_YAW[zone_key]
+        chaser_yaw = clear + (yaw_draw / math.pi) * half
+    else:
+        chaser_yaw = yaw_draw
 
     # Target: 8-12m in front of chaser (v3.1; was 3-6m — too close, immediate
     # FOV loss when the mover starts)
@@ -161,7 +189,7 @@ def main():
 
     rospy.loginfo("")
     rospy.loginfo("=" * 65)
-    rospy.loginfo("[RandomSpawn] v3.1 | Zone %s: %s" % (zone_key, desc))
+    rospy.loginfo("[RandomSpawn] v3.2 | Zone %s: %s" % (zone_key, desc))
     rospy.loginfo("=" * 65)
     rospy.loginfo("  Chaser:  x=%.1f  y=%.1f  z=%.1f  yaw=%.0f deg"
                   % (chaser_x, chaser_y, chaser_z, math.degrees(chaser_yaw)))

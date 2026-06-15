@@ -231,14 +231,23 @@ sleep 1
 # Loss watchdog: if the IBVS phase stays SEARCH for LOSS_TIMEOUT consecutive
 # seconds the run is unrecoverable — end it early instead of burning the rest
 # of DURATION. Phase is read from the live logger CSV (col 2, 10 Hz).
+# Default 10 s = TUNING runs (fail fast). Official --matrix batches export
+# LOSS_TIMEOUT=60 via run_config.sh: a 10 s abort censors the recovery-time
+# metric and biases against Config 1 (raw mode drops out more, recovers
+# slower); a 60 s abort is itself a recorded outcome (aborted=1 in summary).
 LOSS_TIMEOUT="${LOSS_TIMEOUT:-10}"
 echo ""
 echo "  >>> Mission running for ${DURATION}s (loss watchdog ${LOSS_TIMEOUT}s) <<<"
-ELAPSED=0; LOST=0; ABORT_REASON=""
+SIM_T0=$(tail -n 1 ~/flight_log_latest.csv 2>/dev/null | cut -d, -f1)
+ELAPSED=0; LOST=0; ABORT_REASON=""; ACQUIRED=0
 while [ $ELAPSED -lt $DURATION ]; do
     sleep 5; ELAPSED=$((ELAPSED+5))
     PHASE=$(tail -n 1 ~/flight_log_latest.csv 2>/dev/null | cut -d, -f2)
-    if [ "$PHASE" = "SEARCH" ]; then
+    # First-acquisition grace: SEARCH only counts toward the abort after the
+    # run has tracked at least once (APPROACH/HOLD seen) — aborting during
+    # initial acquisition would kill runs the controller handles fine.
+    case "$PHASE" in APPROACH|HOLD) ACQUIRED=1 ;; esac
+    if [ "$PHASE" = "SEARCH" ] && [ $ACQUIRED -eq 1 ]; then
         LOST=$((LOST+5))
     else
         LOST=0
@@ -248,11 +257,16 @@ while [ $ELAPSED -lt $DURATION ]; do
         break
     fi
 done
+SIM_T1=$(tail -n 1 ~/flight_log_latest.csv 2>/dev/null | cut -d, -f1)
+SIM_SPAN=$(awk -v a="${SIM_T0:-0}" -v b="${SIM_T1:-0}" 'BEGIN{printf "%.0f", b-a}')
 if [ -n "$ABORT_REASON" ]; then
     echo "  >>> Mission ABORTED at ${ELAPSED}s: $ABORT_REASON <<<"
 else
     echo "  >>> Mission complete <<<"
 fi
+# Wall-vs-sim visibility: the loop counts WALL seconds against a SIM-second
+# DURATION (fine at RTF=1.00) — any future RTF drop shows up right here.
+echo "  >>> Mission span: ${ELAPSED}s wall / ${SIM_SPAN}s sim <<<"
 echo ""
 
 # Stop logger gracefully first (flush CSV)
@@ -278,10 +292,11 @@ if [ -f "$CSV_OUT" ]; then
     [ -n "$ABORT_REASON" ] && \
         echo "RUN ABORTED at ${ELAPSED}s/${DURATION}s: $ABORT_REASON" >> "$ANALYSIS_OUT"
     echo "[Metrics] Extracting summary metrics..."
+    ABORTED_FLAG=0; [ -n "$ABORT_REASON" ] && ABORTED_FLAG=1
     python3 $PKG_DIR/scripts/extract_metrics.py \
         --csv "$CSV_OUT" --config $CONFIG \
         --zone $ZONE --traj $TRAJ \
-        --seed $SEED --duration $DURATION
+        --seed $SEED --duration $DURATION --aborted $ABORTED_FLAG
 fi
 
 # Cleanup
@@ -295,5 +310,6 @@ echo "  DONE: $CFG_LABEL / $RUN_TAG"
 echo "  CSV:      $CSV_OUT"
 echo "  Analysis: $ANALYSIS_OUT"
 echo "  Summary:  $RESULTS_BASE/summary.csv"
+echo "  (manual runs: ./sync_results.sh to mirror to OneDrive)"
 echo "================================================================"
 echo ""

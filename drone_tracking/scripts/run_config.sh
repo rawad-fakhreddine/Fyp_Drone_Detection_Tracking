@@ -34,6 +34,11 @@ done
 # B7: deterministic matrix mode overrides --runs/--zone/--traj
 if [ "$MATRIX" = "true" ]; then
     RUNS=$((32 * REPEATS)); ZONE="matrix{5,6,7,9}"; TRAJ="1-8"
+    # Official matrix protocol: LOSS_TIMEOUT=60, not the 10 s tuning default —
+    # a 10 s abort censors the recovery-time metric and biases against Config 1
+    # (raw mode drops out more, recovers slower); an abort at 60 s is itself a
+    # recorded outcome (aborted=1 + mission_duration_s in summary.csv).
+    export LOSS_TIMEOUT=60
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

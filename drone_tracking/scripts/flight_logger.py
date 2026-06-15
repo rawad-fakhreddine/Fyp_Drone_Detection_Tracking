@@ -5,6 +5,11 @@ flight_logger.py — M9.3
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
 
+M9.6 step 3 (IBVS v6.26 P1 guard): new 'emerg' column ('1'/'0', appended at
+  END for back-compat) sampled from /drone_tracking/emergency_brake — records
+  when the emergency brake override is engaged. EMERGENCY is a flag, NOT a
+  phase (the watchdog and HOLD% metrics parse the phase string unchanged).
+
 M9.6 (B5): logging rate 4 Hz -> 10 Hz (denser sampling for the derivative-noise
   metrics in the Q sweep). Logger is now launched BEFORE takeoff_both so the
   TAKEOFF phase and early SEARCH are captured. No rate-dependent logic exists
@@ -23,7 +28,7 @@ import rospy, math, csv, os
 import numpy as np
 from geometry_msgs.msg import PoseStamped, Point, Quaternion
 from mavros_msgs.msg import State, PositionTarget
-from std_msgs.msg import String, Float32MultiArray
+from std_msgs.msg import String, Float32MultiArray, Bool
 from gazebo_msgs.msg import ModelStates
 
 
@@ -38,6 +43,7 @@ class FlightLogger:
         self.cmd_frame = 0
         self.phase = "UNKNOWN"
         self.armed = False
+        self.emerg = False   # v6.26 emergency brake engaged flag
 
         # ── Target state (M7.3) ──────────────────────────────────────
         self.target_px = float('nan')
@@ -119,6 +125,8 @@ class FlightLogger:
             'fuzzy_vz',          # fuzzy output: vertical rate (m/s)
             # M9.3 world-frame altitude error
             'world_alt_err',     # chaser_wz - target_wz (Gazebo world frame, no spawn bias)
+            # M9.6 step 3: IBVS v6.26 emergency brake flag (appended at END)
+            'emerg',             # '1' while the P1 emergency brake override is engaged
         ])
 
         # ── Subscribers ──────────────────────────────────────────────
@@ -133,6 +141,7 @@ class FlightLogger:
         rospy.Subscriber('/drone_tracking/ibvs_setpoints', Quaternion,       self.ppo_cb,         queue_size=1)
         rospy.Subscriber('/gazebo/model_states',           ModelStates,      self.gazebo_cb,      queue_size=1)
         rospy.Subscriber('/drone_tracking/target_fuzzy_state', Float32MultiArray, self.fuzzy_cb,  queue_size=1)
+        rospy.Subscriber('/drone_tracking/emergency_brake', Bool,                self.emerg_cb,   queue_size=1)
 
         self.rate = rospy.Rate(10)
         rospy.loginfo("[FlightLogger] M9.3 started (10 Hz, B5) | CSV: %s" % self.csv_path)
@@ -159,6 +168,7 @@ class FlightLogger:
 
     def phase_cb(self, msg): self.phase = msg.data
     def state_cb(self, msg): self.armed = msg.armed
+    def emerg_cb(self, msg): self.emerg = msg.data
 
     def raw_cb(self, msg):
         if np.isnan(msg.x) or np.isnan(msg.y) or np.isnan(msg.z):
@@ -287,6 +297,7 @@ class FlightLogger:
                 f(self.fuzzy_omega, '%.3f')  if self.got_fuzzy else '',
                 f(self.fuzzy_vz,   '%.3f')   if self.got_fuzzy else '',
                 '%.3f' % world_alt_err if not math.isnan(world_alt_err) else '',  # M9.3
+                '1' if self.emerg else '0',   # M9.6 step 3: v6.26 emergency brake
             ])
             self.csv_file.flush()
             self.rate.sleep()
