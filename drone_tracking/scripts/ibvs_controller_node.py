@@ -1,9 +1,50 @@
 #!/usr/bin/env python3
 """
-ibvs_controller_node.py  —  v6.25  (2-stage velocity-predicted SEARCH)
+ibvs_controller_node.py  —  v6.28  (SEARCH recovery speeds)
 =======================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
+
+v6.28 — SEARCH recovery speeds (2026-06-15):
+  Phantom-lock / T7 prep: SEARCH ran slower (Stage 1 1.0, Stage 2 2.0 m/s)
+  than the fastest target (T3/T7 = 3.5 m/s), so once the target was lost the
+  separation diverged and the 2-stage search could never recover. Raised
+  SEARCH speeds to Stage 1 2.5, Stage 2 4.5 m/s (Stage 2 = max_vx; SEARCH
+  cvx is published un-clamped) so search can out-run a fleeing target. Stage
+  logic, yaw sweep, Kalman prediction and the emergency guard are unchanged.
+
+v6.27 — pursuit speed headroom (2026-06-11):
+  Stress-trio T3 (straight, target 3.5 m/s): HOLD 9.8%, separation grew
+  past 20 m, watchdog abort at 57 s sim — chaser max_vx (3.5) EQUALLED the
+  target speed, so closure was geometrically impossible. Structural, not
+  tunable by gains. max_vx 3.5 -> 4.5 (~30% speed advantage), now the
+  ~max_vx rosparam. PX4 side checked: MPC_XY_VEL_MAX = 12.0 m/s (build
+  default, no init.d-posix override) — 4.5 is not clipped. Intended side
+  effect: the v6.26 emergency brake commands vx = -max_vx while engaged,
+  so brake authority rises to -4.5 too. max_vx_retreat (0.50) deliberately
+  NOT changed here — decide after re-run emerg data. Control law untouched.
+
+v6.26 — P1 chaser-target collision guard (2026-06-11):
+  Collision forensics (T2 z5 seed42 run): the chaser closed from 2.1 m to
+  0.40 m over ~6 s with cmd_vx PINNED at -0.50 the whole time — the brake
+  branch was working but is clamped by max_vx_retreat=0.50 m/s, so a 1 m/s
+  target closing on the chaser out-runs the brake. Kalman was NOT a main
+  contributor (3 collapse-rejection rows near the peak; PRED bridging
+  behaved correctly).
+
+  Guard (sits ABOVE the control law — normal-region behavior unchanged):
+    ALPHA_EMERGENCY      = 0.033  (~alpha_emergency rosparam)
+      chosen from data: 3.6x the healthy-HOLD alpha ceiling (max 0.0091
+      across T1/T2 healthy HOLD), ~2x the HOLD band ceiling
+      (alpha_star+ea_hold = 0.0167), 10x below the collision peak (0.353);
+      crossed 5.2 s before closest approach in the recorded collision.
+    ALPHA_EMERGENCY_EXIT = 0.7 x ALPHA_EMERGENCY  (hysteresis, no chatter)
+  While engaged: vx = -max_vx (full braking; bypasses vel_smooth AND the
+  max_vx_retreat clamp — smoothing/clamping a brake defeats it); vy/vz/wz
+  keep tracking. Target lost while engaged -> release, normal SEARCH logic
+  (never brake blind). Engaged state on /drone_tracking/emergency_brake
+  (flight_logger 'emerg' column). Identical in raw/kalman modes
+  (ablation-safe: uses the same alpha the controller already consumes).
 
 v6.22 — SEARCH phase v2:
   Problem: SEARCH at 0.3 m/s could not recover from separations >30m
@@ -72,8 +113,18 @@ class IBVSController:
         self.Kp_wz=0.9; self.Ki_wz=0.; self.Kd_wz=0.15
 
         # Velocity limits
-        self.max_vx=3.5; self.max_vx_retreat=0.50
+        # v6.27: max_vx 3.5 -> 4.5 (~max_vx rosparam). T3 proved 3.5 gives
+        # ZERO closure on a 3.5 m/s target; interception needs a speed
+        # advantage (~30%). PX4 MPC_XY_VEL_MAX=12 (build default) won't clip.
+        self.max_vx=float(rospy.get_param("~max_vx",4.5)); self.max_vx_retreat=0.50
         self.max_vy=1.20; self.max_vz=1.5; self.max_wz=0.5
+
+        # v6.26: P1 emergency brake guard (override above the control law)
+        self.ALPHA_EMERGENCY      = float(rospy.get_param("~alpha_emergency", 0.033))
+        self.ALPHA_EMERGENCY_EXIT = float(rospy.get_param(
+            "~alpha_emergency_exit", 0.7*self.ALPHA_EMERGENCY))
+        self.emergency_engaged = False
+        self._emerg_count = 0
 
         # v6.22: min_altitude_safe raised to match new Z_FLOOR=12m
         self.min_altitude_safe=13.0; self.alpha_min_valid=0.0005
@@ -106,6 +157,7 @@ class IBVSController:
         self.cmd_pub=rospy.Publisher('/mavros/setpoint_raw/local',PositionTarget,queue_size=1)
         self.active_pub=rospy.Publisher('/drone_tracking/ibvs_active',Bool,queue_size=1)
         self.phase_pub=rospy.Publisher('/drone_tracking/ibvs_phase',String,queue_size=1)
+        self.emerg_pub=rospy.Publisher('/drone_tracking/emergency_brake',Bool,queue_size=1)
         det_topic = '/drone_tracking/filtered_target' if self.detection_source == 'kalman' else '/drone_tracking/target_center'
         rospy.Subscriber(det_topic, Point, self.detection_cb, queue_size=1)
         rospy.loginfo("[IBVS] detection_source=%s (subscribing to %s)" % (self.detection_source, det_topic))
@@ -116,8 +168,10 @@ class IBVSController:
         rospy.Subscriber('/drone_tracking/takeoff_ready',Bool,self.takeoff_ready_cb,queue_size=1)
 
         self.dt=1./20.; self.rate=rospy.Rate(20)
-        rospy.loginfo("[IBVS] v6.25 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f"
+        rospy.loginfo("[IBVS] v6.28 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f"
                       %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE))
+        rospy.loginfo("[IBVS] v6.26 emergency brake: engage a>%.4f, release a<%.4f (P1 guard)"
+                      %(self.ALPHA_EMERGENCY,self.ALPHA_EMERGENCY_EXIT))
         self.run()
 
     def state_cb(self,m): self.armed=m.armed
@@ -237,8 +291,8 @@ class IBVSController:
                 # v6.22: 2-stage velocity-predicted search
                 self._search_elapsed += self.dt
                 if self._search_elapsed < 3.0:
-                    # Stage 1: 1.0 m/s toward Kalman-predicted target position
-                    cvx = 1.0
+                    # Stage 1: 2.5 m/s toward Kalman-predicted target position (v6.28)
+                    cvx = 2.5
                     if self.last_cx is not None:
                         ex_s=(self._pred_cx-self.img_cx)/self.img_cx
                         ey_s=(self._pred_cy-self.img_cy)/self.img_cy
@@ -254,8 +308,8 @@ class IBVSController:
                         cvz=float(np.clip(
                             (self.min_altitude_safe-self.altitude)*0.3, -.20, .30))
                 else:
-                    # Stage 2: 2.0 m/s + slow yaw sweep ±30° around velocity heading
-                    cvx = 2.0
+                    # Stage 2: 4.5 m/s + slow yaw sweep ±30° around velocity heading (v6.28)
+                    cvx = 4.5
                     sweep = 0.25 * math.sin(self._search_elapsed * 0.4)  # ~16s period
                     cwz = float(np.clip(
                         self._search_base_cwz + sweep, -self.max_wz, self.max_wz))
@@ -298,6 +352,33 @@ class IBVSController:
                     cvx,cvy,cvz,cwz=self.compute_velocities(gain_scale=1.)
                 elif self.is_prediction:
                     cvx,cvy,cvz,cwz=self.compute_velocities(gain_scale=self.pred_gain_scale)
+
+            # ── v6.26: P1 EMERGENCY BRAKE GUARD — override ABOVE the control law.
+            # The normal brake branch saturates at max_vx_retreat=0.50 m/s; a
+            # target closing faster than that out-runs it (recorded collision:
+            # 0.40 m separation). Above ALPHA_EMERGENCY, vx is forced to full
+            # reverse, bypassing both vel_smooth and the retreat clamp (a
+            # smoothed/clamped brake defeats its purpose). vy/vz/wz keep
+            # tracking so the camera stays on the target. Hysteresis exit
+            # prevents chatter at the boundary. If the target is lost while
+            # engaged, release and let normal SEARCH logic take over — never
+            # brake blind.
+            if self.phase in ("APPROACH","HOLD") and (self.got_real_detection or self.is_prediction):
+                if not self.emergency_engaged and self.alpha > self.ALPHA_EMERGENCY:
+                    self.emergency_engaged=True; self._emerg_count+=1
+                    rospy.logwarn("[IBVS] EMERGENCY BRAKE ENGAGED #%d a=%.4f > %.4f"
+                                  %(self._emerg_count,self.alpha,self.ALPHA_EMERGENCY))
+                elif self.emergency_engaged and self.alpha < self.ALPHA_EMERGENCY_EXIT:
+                    self.emergency_engaged=False
+                    rospy.loginfo("[IBVS] Emergency brake RELEASED a=%.4f < %.4f"
+                                  %(self.alpha,self.ALPHA_EMERGENCY_EXIT))
+                if self.emergency_engaged:
+                    cvx=-self.max_vx
+                    self.prev_vx=cvx   # keep smoother memory consistent for release
+            elif self.emergency_engaged:
+                self.emergency_engaged=False
+                rospy.logwarn("[IBVS] Emergency brake RELEASED (target lost) — SEARCH takes over")
+            self.emerg_pub.publish(Bool(data=self.emergency_engaged))
 
             if pub and self.armed and self.altitude<0.5 and self.phase not in ("TAKEOFF","DISARMED"):
                 cvz=max(cvz,.3)
