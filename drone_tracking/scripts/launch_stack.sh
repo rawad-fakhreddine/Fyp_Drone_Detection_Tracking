@@ -138,13 +138,13 @@ echo "[T3] YOLO detection node..."
 rosrun drone_tracking yolo_detection_node.py > /tmp/T3_${RUN_TAG}.log 2>&1 &
 sleep 3
 
-# TV — YOLO debug viewer (live detection overlay window; VIEWER=0 to disable
-# for long unattended batches). Killed by cleanup.sh like every other node.
-if [ "${VIEWER:-1}" = "1" ]; then
-    echo "[TV] YOLO debug viewer..."
+# TV — YOLO debug viewer (live detection overlay window; default OFF so batch
+# runs stay headless. VIEWER=1 opens the window). Killed by cleanup.sh.
+if [ "${VIEWER:-0}" = "1" ]; then
+    echo "[TV] YOLO debug viewer (VIEWER=1)..."
     rosrun drone_tracking yolo_debug_viewer.py > /tmp/TV_${RUN_TAG}.log 2>&1 &
 else
-    echo "[TV] Viewer SKIPPED (VIEWER=0)"
+    echo "[TV] Viewer SKIPPED (VIEWER=0 / default headless)"
 fi
 
 # T4 — Kalman (configs 2, 3 only)
@@ -192,6 +192,7 @@ sleep 3
 echo "[T7] IBVS (use_ppo=$USE_PPO detection_source=$DET_SRC)..."
 rosrun drone_tracking ibvs_controller_node.py \
     _use_ppo:=$USE_PPO _detection_source:=$DET_SRC \
+    _search_latch:=${SEARCH_LATCH:-false} _search_tau:=${SEARCH_TAU:-1.0} \
     > /tmp/T7_${RUN_TAG}.log 2>&1 &
 sleep 2
 

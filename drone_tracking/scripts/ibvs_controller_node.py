@@ -1,9 +1,44 @@
 #!/usr/bin/env python3
 """
-ibvs_controller_node.py  —  v6.28  (SEARCH recovery speeds)
+ibvs_controller_node.py  —  v6.30  (time-bound SEARCH heading latch)
 =======================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
+
+v6.30 — time-bound SEARCH heading latch, light single-knob form (2026-06-19):
+  v6.29 latch won on deterministic escape (T7) but backfired on reactive
+  evasion (T9): committing to the loss-instant heading FOREVER flies the
+  chaser the wrong way when the target reverses mid-gap. Fix (deliberately
+  minimal): scale the latched heading by ONE smooth decay weight
+  w(t)=exp(-t/tau), t = time since loss. w=1 at the loss instant and fades
+  smoothly toward 0, so the heading is trusted early (helps T7) and abandoned
+  before a mid-gap reverse can be committed to (protects T9). One knob:
+  ~search_tau (default 1.0 s; larger = trust the heading longer). One safety:
+  the per-step heading extrapolation is clamped to SEARCH_STEP_CLAMP_PX so a
+  large v0 can't slam the predicted position to the frame edge. The Stage-2
+  sweep center is recomputed each tick from the decayed v0, so it too fades to
+  a neutral sweep. SEARCH-ONLY and gated by ~search_latch: with the flag off,
+  svx=live _kf_vx=0 (Kalman-zeroed by 1.5 s) -> behavior is byte-for-byte
+  v6.28; HOLD/APPROACH command output is untouched; Config 1 has no
+  kalman_velocity -> v0=0 -> graceful blind search.
+
+v6.29 — SEARCH loss-instant velocity latch (2026-06-19):
+  Root cause found: the v6.22 "velocity-predicted SEARCH" always read ZERO
+  velocity. The Kalman hard-zeroes its velocity state at max_dropout=30
+  frames = 1.5 s of dropout, but IBVS only enters SEARCH at
+  detection_timeout = 3.0 s after loss and reads _kf_vx THEN — by which time
+  it is 0. So _search_base_cwz=0, _pred_cx froze at the last position, and
+  Stage 2 was a blind ±30° sweep around heading 0. Offline damping/Q/R/
+  standoff sweeps were all flat because none of them touch this.
+  Fix: latch v0=(_kf_vx,_kf_vy) from the LAST tracking frame (while the
+  estimate is still valid) and use that frozen heading for the Stage-1
+  position extrapolation and the Stage-2 sweep center, plus extrapolate the
+  last-known position forward by v0 over the APPROACH->SEARCH gap. Gated by
+  ~search_latch (default True). SEARCH-ONLY: HOLD/APPROACH command output is
+  byte-for-byte unchanged (the latch update never feeds the control law);
+  with the flag off, behavior is identical to v6.28 (svx = live _kf_vx = 0 at
+  3 s). Config 1 (no kalman_velocity) keeps v0=0 -> graceful blind-search
+  fallback. Logs v0 at loss and at SEARCH start for verification.
 
 v6.28 — SEARCH recovery speeds (2026-06-15):
   Phantom-lock / T7 prep: SEARCH ran slower (Stage 1 1.0, Stage 2 2.0 m/s)
@@ -153,6 +188,30 @@ class IBVSController:
         self._pred_cx=self.img_cx                # predicted target cx during SEARCH
         self._pred_cy=self.img_cy                # predicted target cy during SEARCH
         self._search_base_cwz=0.0               # yaw bias from velocity at loss
+        # v6.29: latch the loss-instant velocity for SEARCH heading. The Kalman
+        # zeroes its velocity at max_dropout=30 frames (1.5 s), but SEARCH only
+        # reads it at detection_timeout=3.0 s -> it was always 0, so SEARCH flew
+        # blind. We latch (_kf_vx,_kf_vy) from the LAST tracking frame (while
+        # still valid) and use that frozen v0 for the SEARCH heading. SEARCH-
+        # only: HOLD/APPROACH output untouched. Config 1 has no kalman_velocity
+        # so v0 stays 0 -> graceful fallback to blind search.
+        # Default OFF: the tau sweep (2026-06-19) showed the latch never lifts the
+        # T7 gate (its bottleneck is FOV/closure, not SEARCH heading) and only
+        # helps reactive evasion (T9) at tau=1.0; default-on would regress the
+        # deterministic gate + matrix. Kept as an opt-in evasion-recovery aid.
+        self._search_latch=bool(rospy.get_param("~search_latch", False))
+        self._kf_vx_latched=0.0; self._kf_vy_latched=0.0
+        self._was_tracking=False
+        # v6.30 (light): time-bound the latched heading with ONE smooth decay.
+        # The heading weight is w(t)=exp(-t/tau), t = time since loss: full at
+        # the loss instant, fading smoothly toward 0. tau is the single knob
+        # (~search_tau, larger = trust the heading longer). T7 (deterministic
+        # escape) benefits from the early-high weight; T9 (reactive evasion) is
+        # protected because the heading fades before a mid-gap reverse can be
+        # committed to. ONE clamp constant bounds the per-step extrapolation so
+        # a large v0 can't slam the predicted position to the frame edge.
+        self._search_tau=float(rospy.get_param("~search_tau", 1.0))
+        self.SEARCH_STEP_CLAMP_PX=12.0   # max |per-tick heading extrapolation| (px)
 
         self.cmd_pub=rospy.Publisher('/mavros/setpoint_raw/local',PositionTarget,queue_size=1)
         self.active_pub=rospy.Publisher('/drone_tracking/ibvs_active',Bool,queue_size=1)
@@ -168,8 +227,9 @@ class IBVSController:
         rospy.Subscriber('/drone_tracking/takeoff_ready',Bool,self.takeoff_ready_cb,queue_size=1)
 
         self.dt=1./20.; self.rate=rospy.Rate(20)
-        rospy.loginfo("[IBVS] v6.28 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f"
-                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE))
+        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
+                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self._search_latch,
+                        self._search_tau,self.SEARCH_STEP_CLAMP_PX))
         rospy.loginfo("[IBVS] v6.26 emergency brake: engage a>%.4f, release a<%.4f (P1 guard)"
                       %(self.ALPHA_EMERGENCY,self.ALPHA_EMERGENCY_EXIT))
         self.run()
@@ -195,6 +255,22 @@ class IBVSController:
     def kf_vel_cb(self,m):
         """Receives Kalman velocity state for SEARCH direction prediction."""
         self._kf_vx=float(m.x); self._kf_vy=float(m.y)
+    def _heading_weight(self):
+        """v6.30 (light): single smooth confidence decay for the latched heading.
+        w(t)=exp(-t/tau), t = time since loss. w=1 at the loss instant, fading
+        toward 0 so a stale heading is abandoned rather than chased."""
+        if self._search_tau<=0.0: return 0.0
+        return float(math.exp(-self.time_since_detection()/self._search_tau))
+
+    def _srch_v(self):
+        """Velocity used for SEARCH heading. v6.30 (light): the latched loss-
+        instant v0 scaled by the time-decay weight w(t). With search_latch off,
+        returns the live (already-zeroed) estimate -> svx=0 -> byte-for-byte
+        v6.28. Config 1 has no kalman_velocity -> v0=0 -> graceful blind search."""
+        if not self._search_latch:
+            return self._kf_vx, self._kf_vy
+        w=self._heading_weight()
+        return self._kf_vx_latched*w, self._kf_vy_latched*w
     def setpoints_cb(self,m):
         if not self.USE_PPO:return
         self.x_star=np.clip(float(m.x),-.3,.3);self.y_star=np.clip(float(m.y),-.3,.3)
@@ -277,6 +353,17 @@ class IBVSController:
     def run(self):
         while not rospy.is_shutdown():
             cvx=cvy=cvz=cwz=0.; pub=True
+            # v6.29: latch velocity WHILE actively tracking (used only by SEARCH).
+            # This update never feeds the control law, so HOLD/APPROACH output is
+            # unchanged. On the tracking->loss transition, freeze v0 and log it.
+            if self.got_real_detection and self.phase in ("APPROACH","HOLD"):
+                self._kf_vx_latched=self._kf_vx; self._kf_vy_latched=self._kf_vy
+                self._was_tracking=True
+            elif self._was_tracking and not self.got_real_detection:
+                self._was_tracking=False
+                if self._search_latch:
+                    rospy.loginfo("[IBVS] LOSS — latched v0=(%.1f,%.1f) px/s for SEARCH heading"
+                                  %(self._kf_vx_latched,self._kf_vy_latched))
             if not self.armed: self.phase="DISARMED"; pub=False
             elif self.phase=="DISARMED": self.phase="TAKEOFF"; pub=False
             elif self.phase=="TAKEOFF":
@@ -298,11 +385,16 @@ class IBVSController:
                         ey_s=(self._pred_cy-self.img_cy)/self.img_cy
                         cwz=float(np.clip(-0.4*ex_s,-self.max_wz,self.max_wz))
                         cvz=float(np.clip(-0.4*ey_s,-0.40,0.40))
-                        # Extrapolate predicted position each tick
+                        # Extrapolate predicted position each tick along the
+                        # time-decayed latched v0 (v6.30 light). The per-step
+                        # displacement is clamped so a large v0 can't slam the
+                        # prediction to the frame edge.
+                        svx,svy=self._srch_v()
+                        c=self.SEARCH_STEP_CLAMP_PX
                         self._pred_cx=float(np.clip(
-                            self._pred_cx+self._kf_vx*self.dt, 0., self.img_w))
+                            self._pred_cx+np.clip(svx*self.dt,-c,c), 0., self.img_w))
                         self._pred_cy=float(np.clip(
-                            self._pred_cy+self._kf_vy*self.dt, 0., self.img_h))
+                            self._pred_cy+np.clip(svy*self.dt,-c,c), 0., self.img_h))
                     else:
                         # No detection memory yet — climb to safe altitude
                         cvz=float(np.clip(
@@ -311,8 +403,12 @@ class IBVSController:
                     # Stage 2: 4.5 m/s + slow yaw sweep ±30° around velocity heading (v6.28)
                     cvx = 4.5
                     sweep = 0.25 * math.sin(self._search_elapsed * 0.4)  # ~16s period
-                    cwz = float(np.clip(
-                        self._search_base_cwz + sweep, -self.max_wz, self.max_wz))
+                    # v6.30: recompute the heading bias from the TIME-WEIGHTED v0
+                    # every tick — as confidence decays the center -> 0, leaving a
+                    # neutral sweep. flag-off: svx=0 -> base=0 (== v6.28).
+                    svx,_=self._srch_v()
+                    base_cwz=float(np.clip(-0.2*svx/self.img_cx,-self.max_wz,self.max_wz))
+                    cwz = float(np.clip(base_cwz + sweep, -self.max_wz, self.max_wz))
                     if self.last_cy is not None:
                         ey_s=(self.last_cy-self.img_cy)/self.img_cy
                         cvz=float(np.clip(-0.3*ey_s,-0.40,0.40))
@@ -327,10 +423,19 @@ class IBVSController:
                 if da>self.detection_timeout:
                     self.reset_pid(); self.phase="SEARCH"
                     self._search_elapsed=0.0
+                    # v6.30 (light): seed SEARCH at the last-known position (no
+                    # one-shot jump) and let the clamped per-step extrapolation
+                    # carry it along the time-decayed heading. With search_latch
+                    # off, svx=live _kf_vx=0 -> seed == last_cx -> identical to
+                    # v6.28. The sweep center starts along the decayed heading.
+                    svx,svy=self._srch_v()
                     self._pred_cx=float(self.last_cx) if self.last_cx is not None else self.img_cx
                     self._pred_cy=float(self.last_cy) if self.last_cy is not None else self.img_cy
                     self._search_base_cwz=float(np.clip(
-                        -0.2*self._kf_vx/self.img_cx, -self.max_wz, self.max_wz))
+                        -0.2*svx/self.img_cx, -self.max_wz, self.max_wz))
+                    if self._search_latch:
+                        rospy.loginfo("[IBVS] SEARCH start: v0=(%.1f,%.1f) px/s w=%.2f base_cwz=%.2f"
+                                      %(svx,svy,self._heading_weight(),self._search_base_cwz))
                 elif da>self.stale_timeout: pass
                 elif self.got_real_detection:
                     cvx,cvy,cvz,cwz=self.compute_velocities(gain_scale=self.approach_ramp_factor())

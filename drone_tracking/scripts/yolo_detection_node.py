@@ -29,11 +29,14 @@ v3.3 changes from v3.2 (M9.6 — T7 phantom-chase fix):
 
   A. PLAUSIBILITY FILTER (every frame, anchored to the target's true size —
      iris from target_iris_sitl/iris.sdf: rotor-tip-to-tip 0.52-0.77 m,
-     body height 0.11 m; camera f=307 px → w_px(Z) = 307*W/Z):
+     body height 0.11 m; camera f=277 px (live camera_info, 2026-06-15 —
+     was mis-stated as 307) → w_px(Z) = 277*W/Z):
        ~min_box_px (3)   : w below the px width of the narrow 0.52 m span at
-                           Z_max≈60 m (307*0.52/60≈2.6) = clutter speck
+                           Z_max≈60 m (277*0.52/60≈2.4) = clutter speck
        ~max_box_px (300) : w above the px width of the 0.77 m diagonal at
-                           Z_min≈0.8 m (307*0.77/0.8≈294) = nonsense
+                           Z_min≈0.8 m (277*0.77/0.8≈267) = nonsense
+                           (bounds [3,300] px still valid under f=277 — both
+                            limits bracket the re-derived range with margin)
        ~aspect_min/~aspect_max ([0.8, 6.0]) : w/h band (iris side-on is
                            wide+flat ~3; head-on ~1.5)
      Rejected boxes are never published; per-100-frame rejection counts are
@@ -115,7 +118,7 @@ class YoloNode:
         self.conf_track   = float(rospy.get_param('~conf', 0.35))         # while TRACKING
         self.conf_acquire = float(rospy.get_param('~conf_acquire', 0.55)) # while LOST/CONFIRMING
 
-        # v3.3 A: plausibility bounds (px) — anchored to iris true size, f=307
+        # v3.3 A: plausibility bounds (px) — anchored to iris true size, f=277
         self.min_box_px = float(rospy.get_param('~min_box_px', 3.0))
         self.max_box_px = float(rospy.get_param('~max_box_px', 300.0))
         self.aspect_min = float(rospy.get_param('~aspect_min', 0.8))
