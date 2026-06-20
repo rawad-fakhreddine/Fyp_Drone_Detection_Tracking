@@ -128,6 +128,25 @@ def main():
     times = [t for t in (fnum(r, 'sim_time') for r in rows) if t is not None]
     mission_duration_s = round(max(times) - min(times), 1) if times else ''
 
+    # ── M10.3: HOLD-phase yaw zero-crossing rate (oscillation guard) ─────────
+    #   Sign changes of the published cmd_wz across consecutive HOLD samples,
+    #   per second of HOLD sim-time. Over-gain (dropped damping ratio with fixed
+    #   Kd_wz) shows up as yaw ringing -> elevated crossing rate -> a disqualifier
+    #   for the Kp_wz/Kp_y sweep even if HOLD% rises (M10.3 sweep accept gate).
+    hold_rows = [r for r in rows if r.get('phase','') == 'HOLD']
+    def _sgn(v): return 1 if v > 1e-4 else (-1 if v < -1e-4 else 0)
+    xings = 0; prev_s = None; ht0 = ht1 = None
+    for r in hold_rows:
+        wz = fnum(r, 'cmd_wz'); t = fnum(r, 'sim_time')
+        if wz is None or t is None: continue
+        if ht0 is None: ht0 = t
+        ht1 = t
+        s = _sgn(wz)
+        if prev_s is not None and s != 0 and prev_s != 0 and s != prev_s: xings += 1
+        if s != 0: prev_s = s
+    hold_span = (ht1 - ht0) if (ht0 is not None and ht1 is not None and ht1 > ht0) else 0.0
+    hold_yaw_zerocross_hz = round(xings / hold_span, 3) if hold_span > 5.0 else ''
+
     def _opt(x, nd):
         return round(x, nd) if not np.isnan(x) else ''
 
@@ -157,6 +176,8 @@ def main():
         'emergency_brake_count': emergency_brake_count,
         'aborted':               args.aborted,
         'mission_duration_s':    mission_duration_s,
+        # ── M10.3 column (appended at END for backward compatibility) ──
+        'hold_yaw_zerocross_hz': hold_yaw_zerocross_hz,
     }
 
     fieldnames = list(metrics.keys())

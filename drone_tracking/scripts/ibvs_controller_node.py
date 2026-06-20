@@ -143,9 +143,14 @@ class IBVSController:
         self.DEAD_ZONE = 0.002
 
         # Y / Z / yaw PID
-        self.Kp_y=1.8; self.Ki_y=0.05; self.Kd_y=0.3
+        # M10.3: Kp_y / Kp_wz rosparam-overridable for the angular-tracking gain
+        # sweep. Defaults = current hardcoded values -> a plain run is byte-for-
+        # byte baseline. Kd_y/Kd_wz stay fixed; raising Kp alone lowers the
+        # damping ratio, so the sweep gates on a yaw-oscillation (zero-crossing)
+        # disqualifier. No treatment gain is baked into the file.
+        self.Kp_y=float(rospy.get_param("~Kp_y",1.8)); self.Ki_y=0.05; self.Kd_y=0.3
         self.Kp_z=3.0; self.Ki_z=0.04; self.Kd_z=0.5
-        self.Kp_wz=0.9; self.Ki_wz=0.; self.Kd_wz=0.15
+        self.Kp_wz=float(rospy.get_param("~Kp_wz",0.9)); self.Ki_wz=0.; self.Kd_wz=0.15
 
         # Velocity limits
         # v6.27: max_vx 3.5 -> 4.5 (~max_vx rosparam). T3 proved 3.5 gives
@@ -227,8 +232,8 @@ class IBVSController:
         rospy.Subscriber('/drone_tracking/takeoff_ready',Bool,self.takeoff_ready_cb,queue_size=1)
 
         self.dt=1./20.; self.rate=rospy.Rate(20)
-        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
-                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self._search_latch,
+        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | Kp_wz=%.2f Kp_y=%.2f | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
+                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self.Kp_wz,self.Kp_y,self._search_latch,
                         self._search_tau,self.SEARCH_STEP_CLAMP_PX))
         rospy.loginfo("[IBVS] v6.26 emergency brake: engage a>%.4f, release a<%.4f (P1 guard)"
                       %(self.ALPHA_EMERGENCY,self.ALPHA_EMERGENCY_EXIT))
