@@ -194,6 +194,7 @@ rosrun drone_tracking ibvs_controller_node.py \
     _use_ppo:=$USE_PPO _detection_source:=$DET_SRC \
     _search_latch:=${SEARCH_LATCH:-false} _search_tau:=${SEARCH_TAU:-1.0} \
     _Kp_wz:=${KP_WZ:-0.9} _Kp_y:=${KP_Y:-1.8} \
+    _Kp_z:=${KP_Z:-3.0} _max_vz:=${MAX_VZ:-1.5} \
     > /tmp/T7_${RUN_TAG}.log 2>&1 &
 sleep 2
 

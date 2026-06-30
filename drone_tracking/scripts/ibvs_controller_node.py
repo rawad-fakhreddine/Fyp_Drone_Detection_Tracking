@@ -149,7 +149,11 @@ class IBVSController:
         # damping ratio, so the sweep gates on a yaw-oscillation (zero-crossing)
         # disqualifier. No treatment gain is baked into the file.
         self.Kp_y=float(rospy.get_param("~Kp_y",1.8)); self.Ki_y=0.05; self.Kd_y=0.3
-        self.Kp_z=3.0; self.Ki_z=0.04; self.Kd_z=0.5
+        # M10.3 vertical-channel probe: Kp_z rosparam-overridable (default =
+        # current 3.0 -> plain run is byte-for-byte baseline, same discipline as
+        # Kp_wz/Kp_y). Kd_z stays fixed; raising Kp_z alone lowers the damping
+        # ratio, so the sweep gates on an ey zero-crossing (oscillation) guard.
+        self.Kp_z=float(rospy.get_param("~Kp_z",3.0)); self.Ki_z=0.04; self.Kd_z=0.5
         self.Kp_wz=float(rospy.get_param("~Kp_wz",0.9)); self.Ki_wz=0.; self.Kd_wz=0.15
 
         # Velocity limits
@@ -157,7 +161,9 @@ class IBVSController:
         # ZERO closure on a 3.5 m/s target; interception needs a speed
         # advantage (~30%). PX4 MPC_XY_VEL_MAX=12 (build default) won't clip.
         self.max_vx=float(rospy.get_param("~max_vx",4.5)); self.max_vx_retreat=0.50
-        self.max_vy=1.20; self.max_vz=1.5; self.max_wz=0.5
+        # M10.3: max_vz rosparam-overridable (default = current 1.5 -> baseline).
+        # cell D lever if the vz saturation pre-check shows the cap is binding.
+        self.max_vy=1.20; self.max_vz=float(rospy.get_param("~max_vz",1.5)); self.max_wz=0.5
 
         # v6.26: P1 emergency brake guard (override above the control law)
         self.ALPHA_EMERGENCY      = float(rospy.get_param("~alpha_emergency", 0.033))
@@ -232,8 +238,8 @@ class IBVSController:
         rospy.Subscriber('/drone_tracking/takeoff_ready',Bool,self.takeoff_ready_cb,queue_size=1)
 
         self.dt=1./20.; self.rate=rospy.Rate(20)
-        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | Kp_wz=%.2f Kp_y=%.2f | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
-                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self.Kp_wz,self.Kp_y,self._search_latch,
+        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | Kp_wz=%.2f Kp_y=%.2f Kp_z=%.2f max_vz=%.2f | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
+                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self.Kp_wz,self.Kp_y,self.Kp_z,self.max_vz,self._search_latch,
                         self._search_tau,self.SEARCH_STEP_CLAMP_PX))
         rospy.loginfo("[IBVS] v6.26 emergency brake: engage a>%.4f, release a<%.4f (P1 guard)"
                       %(self.ALPHA_EMERGENCY,self.ALPHA_EMERGENCY_EXIT))
