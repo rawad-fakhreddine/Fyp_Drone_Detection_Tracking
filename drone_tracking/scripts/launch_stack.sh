@@ -195,6 +195,8 @@ rosrun drone_tracking ibvs_controller_node.py \
     _search_latch:=${SEARCH_LATCH:-false} _search_tau:=${SEARCH_TAU:-1.0} \
     _Kp_wz:=${KP_WZ:-0.9} _Kp_y:=${KP_Y:-1.8} \
     _Kp_z:=${KP_Z:-3.0} _max_vz:=${MAX_VZ:-1.5} \
+    _lambda_x:=${LAMBDA_X:-1.0} _lambda_y:=${LAMBDA_Y:-1.0} \
+    _lambda_z:=${LAMBDA_Z:-1.0} _lambda_wz:=${LAMBDA_WZ:-1.0} \
     > /tmp/T7_${RUN_TAG}.log 2>&1 &
 sleep 2
 

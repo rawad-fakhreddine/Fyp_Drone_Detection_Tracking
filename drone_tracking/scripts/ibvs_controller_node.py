@@ -117,7 +117,7 @@ import rospy, math
 import numpy as np
 from geometry_msgs.msg import Point, PoseStamped, Quaternion
 from mavros_msgs.msg import State, PositionTarget
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Float32MultiArray
 
 BODY_VEL_TYPE_MASK = (
     PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY | PositionTarget.IGNORE_PZ |
@@ -164,6 +164,21 @@ class IBVSController:
         # M10.3: max_vz rosparam-overridable (default = current 1.5 -> baseline).
         # cell D lever if the vz saturation pre-check shows the cap is binding.
         self.max_vy=1.20; self.max_vz=float(rospy.get_param("~max_vz",1.5)); self.max_wz=0.5
+
+        # ── M12 Phase A: per-axis output multipliers (adaptive-λ knobs) ──────
+        # Generalizes the single forward-aggression `gain` scalar into one
+        # multiplier per channel, applied as a gain on each channel's
+        # control-law output BEFORE its safety clamp + smoothing (so the max_v*
+        # caps and vel_smooth stay authoritative regardless of λ). rosparam
+        # ~lambda_* default 1.0 -> a plain run is byte-for-byte v6.30 (x*1.0==x).
+        # These are the knobs the Phase E adaptive-λ oracle sweep schedules per
+        # trajectory. Supersedes the deprecated PPO-era self.lam scheduler
+        # (Config 3 parked since M9.6).
+        self.lambda_x =float(rospy.get_param("~lambda_x", 1.0))
+        self.lambda_y =float(rospy.get_param("~lambda_y", 1.0))
+        self.lambda_z =float(rospy.get_param("~lambda_z", 1.0))
+        self.lambda_wz=float(rospy.get_param("~lambda_wz",1.0))
+        self.BASE_GAIN=0.70   # was lam_gain's (deployed) use_ppo=false constant
 
         # v6.26: P1 emergency brake guard (override above the control law)
         self.ALPHA_EMERGENCY      = float(rospy.get_param("~alpha_emergency", 0.033))
@@ -228,6 +243,14 @@ class IBVSController:
         self.active_pub=rospy.Publisher('/drone_tracking/ibvs_active',Bool,queue_size=1)
         self.phase_pub=rospy.Publisher('/drone_tracking/ibvs_phase',String,queue_size=1)
         self.emerg_pub=rospy.Publisher('/drone_tracking/emergency_brake',Bool,queue_size=1)
+        # M12 Phase D-prep: publish the controller's EXACT internal error +
+        # derivative signals so flight_logger records the per-config-correct
+        # values (raw stream in C1, filtered in C2). data =
+        # [ex,ey,ea, dex,dey,dea, ctrl_state] where ctrl_state = 1 REAL / 2 PRED
+        # / 0 no-detection-this-cycle. Purely observational — does not touch the
+        # control law (Phase A byte-for-byte gate re-verified).
+        self.err_pub=rospy.Publisher('/drone_tracking/ibvs_errors',Float32MultiArray,queue_size=1)
+        self.ex_c=self.ey_c=self.ea_c=0.0; self.dex_c=self.dey_c=self.dea_c=0.0
         det_topic = '/drone_tracking/filtered_target' if self.detection_source == 'kalman' else '/drone_tracking/target_center'
         rospy.Subscriber(det_topic, Point, self.detection_cb, queue_size=1)
         rospy.loginfo("[IBVS] detection_source=%s (subscribing to %s)" % (self.detection_source, det_topic))
@@ -238,8 +261,9 @@ class IBVSController:
         rospy.Subscriber('/drone_tracking/takeoff_ready',Bool,self.takeoff_ready_cb,queue_size=1)
 
         self.dt=1./20.; self.rate=rospy.Rate(20)
-        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | Kp_wz=%.2f Kp_y=%.2f Kp_z=%.2f max_vz=%.2f | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
-                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self.Kp_wz,self.Kp_y,self.Kp_z,self.max_vz,self._search_latch,
+        rospy.loginfo("[IBVS] v6.30 | K_far=%.0f Kd_a=%.0f ff_max=%.1f max_vx=%.1f dead=%.3f | Kp_wz=%.2f Kp_y=%.2f Kp_z=%.2f max_vz=%.2f | lambda=(%.2f,%.2f,%.2f,%.2f) | search_latch=%s tau=%.2fs step_clamp=%.0fpx"
+                      %(self.K_far,self.Kd_a,self.ff_max,self.max_vx,self.DEAD_ZONE,self.Kp_wz,self.Kp_y,self.Kp_z,self.max_vz,
+                        self.lambda_x,self.lambda_y,self.lambda_z,self.lambda_wz,self._search_latch,
                         self._search_tau,self.SEARCH_STEP_CLAMP_PX))
         rospy.loginfo("[IBVS] v6.26 emergency brake: engage a>%.4f, release a<%.4f (P1 guard)"
                       %(self.ALPHA_EMERGENCY,self.ALPHA_EMERGENCY_EXIT))
@@ -328,12 +352,18 @@ class IBVSController:
         dey=(ey-self.prev_err_y)/self.dt
         dea=(ea-self.prev_err_a)/self.dt
         self.prev_err_x=ex; self.prev_err_y=ey; self.prev_err_a=ea
+        # M12: cache exact internal error+derivative signals for /ibvs_errors
+        self.ex_c=ex; self.ey_c=ey; self.ea_c=ea
+        self.dex_c=dex; self.dey_c=dey; self.dea_c=dea
 
         self.int_err_y=np.clip(self.int_err_y+ex*self.dt,-self.int_y_max,self.int_y_max)
         self.int_err_z=np.clip(self.int_err_z+ey*self.dt,-self.int_z_max,self.int_z_max)
 
-        lam_gain=(.4+.6*self.lam) if self.ppo_is_active() else .70
-        gain=gain_scale*lam_gain
+        # M12 Phase A: PPO-era lam_gain scheduler DEPRECATED (Config 3 parked;
+        # ppo_is_active() is False in every deployed config, where lam_gain
+        # collapsed to the 0.70 base-aggression constant). Per-axis aggression
+        # is now the lambda_x/y/z/wz output multipliers applied below.
+        gain=gain_scale*self.BASE_GAIN
 
         # PD control on alpha with adaptive feedforward
         if self.in_recovery():
@@ -348,11 +378,13 @@ class IBVSController:
             vx = -self.K_near * np.sqrt(ea - self.DEAD_ZONE) * gain
         else:
             vx = 0.
+        vx=vx*self.lambda_x   # M12 λ_x (before safety clamp; λ=1 -> identity)
         vx=np.clip(vx,-self.max_vx_retreat,self.max_vx)
 
         vy=-gain*(self.Kp_y*ex+self.Ki_y*self.int_err_y+self.Kd_y*dex)
         vz=-gain*(self.Kp_z*ey+self.Ki_z*self.int_err_z+self.Kd_z*dey)
         wz=-gain*(self.Kp_wz*ex+self.Kd_wz*dex)
+        vy=vy*self.lambda_y; vz=vz*self.lambda_z; wz=wz*self.lambda_wz  # M12 λ (before clamp)
         vy=np.clip(vy,-self.max_vy,self.max_vy)
         vz=np.clip(vz,-self.max_vz,self.max_vz)
         wz=np.clip(wz,-self.max_wz,self.max_wz)
@@ -501,6 +533,14 @@ class IBVSController:
             if pub: self.cmd_pub.publish(self._build_body_vel_msg(cvx,cvy,cvz,cwz))
             self.active_pub.publish(Bool(data=self.phase in ("APPROACH","HOLD")))
             self.phase_pub.publish(String(data=self.phase))
+            # M12 Phase D-prep: emit exact internal errors + derivatives.
+            # ctrl_state = what the controller acted on THIS cycle (1 REAL /
+            # 2 PRED / 0 none). ex_c..dea_c carry the last compute_velocities
+            # values; a cycle with ctrl_state=0 leaves them stale (masked out
+            # downstream via ctrl_state).
+            _cs = 1.0 if self.got_real_detection else (2.0 if self.is_prediction else 0.0)
+            self.err_pub.publish(Float32MultiArray(data=[
+                self.ex_c,self.ey_c,self.ea_c,self.dex_c,self.dey_c,self.dea_c,_cs]))
             if self.phase in ("APPROACH","HOLD") and self.cx is not None:
                 ev=self.alpha-self.alpha_star
                 dea_v=(ev-self.prev_err_a)/self.dt if hasattr(self,'_last_ea_log') else 0.

@@ -1,9 +1,24 @@
 #!/usr/bin/env python3
 """
-flight_logger.py — M9.3
-========================
+flight_logger.py — M12 (v2)
+===========================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
+
+M12 Phase D-prep (v2): C1-vs-C2 measurement hardening.
+  * Rate 10 Hz -> 20 Hz: the IBVS controller runs at 20 Hz, so jerk (2nd
+    difference of the commanded velocity) computed from a 10 Hz log ALIASES.
+    Logging at 20 Hz captures every setpoint -> jerk/derivative metrics are
+    computed at the controller's native step. All existing metrics are ratio-
+    or sim_time-based (rate-independent), so this is backward-compatible;
+    extract_metrics derives dt from consecutive sim_time deltas, not the rate.
+  * New END-appended columns from /drone_tracking/ibvs_errors (published by
+    ibvs_controller_node): ex_ctrl, ey_ctrl, ea_ctrl, dex, dey, dea, ctrl_state.
+    These are the controller's EXACT internal signals and are per-config-correct
+    (raw stream in C1, filtered in C2) — unlike the legacy ex/ey/ea columns,
+    which are derived from /filtered_target and are therefore 0 in C1 (Kalman
+    node is not launched in Config 1). Use ex_ctrl/dex/... for C1-vs-C2 work.
+    ctrl_state = 1 REAL / 2 PRED / 0 no-detection-this-cycle.
 
 M9.6 step 3 (IBVS v6.26 P1 guard): new 'emerg' column ('1'/'0', appended at
   END for back-compat) sampled from /drone_tracking/emergency_brake — records
@@ -44,6 +59,11 @@ class FlightLogger:
         self.phase = "UNKNOWN"
         self.armed = False
         self.emerg = False   # v6.26 emergency brake engaged flag
+
+        # ── M12 Phase D-prep: controller's exact internal error+derivatives ──
+        self.ex_ctrl = self.ey_ctrl = self.ea_ctrl = float('nan')
+        self.dex = self.dey = self.dea = float('nan')
+        self.ctrl_state = 0.0   # 1 REAL / 2 PRED / 0 no-detection this cycle
 
         # ── Target state (M7.3) ──────────────────────────────────────
         self.target_px = float('nan')
@@ -127,6 +147,10 @@ class FlightLogger:
             'world_alt_err',     # chaser_wz - target_wz (Gazebo world frame, no spawn bias)
             # M9.6 step 3: IBVS v6.26 emergency brake flag (appended at END)
             'emerg',             # '1' while the P1 emergency brake override is engaged
+            # ── M12 Phase D-prep: controller's exact signals (END-appended) ──
+            'ex_ctrl', 'ey_ctrl', 'ea_ctrl',  # errors AS THE CONTROLLER SAW THEM (per-config)
+            'dex', 'dey', 'dea',              # error derivatives (headline C1-vs-C2 signal)
+            'ctrl_state',                     # 1 REAL / 2 PRED / 0 none this cycle
         ])
 
         # ── Subscribers ──────────────────────────────────────────────
@@ -142,9 +166,10 @@ class FlightLogger:
         rospy.Subscriber('/gazebo/model_states',           ModelStates,      self.gazebo_cb,      queue_size=1)
         rospy.Subscriber('/drone_tracking/target_fuzzy_state', Float32MultiArray, self.fuzzy_cb,  queue_size=1)
         rospy.Subscriber('/drone_tracking/emergency_brake', Bool,                self.emerg_cb,   queue_size=1)
+        rospy.Subscriber('/drone_tracking/ibvs_errors',    Float32MultiArray,    self.ibvs_err_cb, queue_size=1)
 
-        self.rate = rospy.Rate(10)
-        rospy.loginfo("[FlightLogger] M9.3 started (10 Hz, B5) | CSV: %s" % self.csv_path)
+        self.rate = rospy.Rate(20)   # M12: match the 20 Hz controller (anti-alias jerk)
+        rospy.loginfo("[FlightLogger] M12 v2 started (20 Hz) | CSV: %s" % self.csv_path)
         self.run()
 
     # ── Callbacks ────────────────────────────────────────────────────
@@ -169,6 +194,13 @@ class FlightLogger:
     def phase_cb(self, msg): self.phase = msg.data
     def state_cb(self, msg): self.armed = msg.armed
     def emerg_cb(self, msg): self.emerg = msg.data
+
+    def ibvs_err_cb(self, msg):
+        d = msg.data
+        if len(d) >= 7:
+            self.ex_ctrl, self.ey_ctrl, self.ea_ctrl = d[0], d[1], d[2]
+            self.dex, self.dey, self.dea = d[3], d[4], d[5]
+            self.ctrl_state = d[6]
 
     def raw_cb(self, msg):
         if np.isnan(msg.x) or np.isnan(msg.y) or np.isnan(msg.z):
@@ -298,6 +330,10 @@ class FlightLogger:
                 f(self.fuzzy_vz,   '%.3f')   if self.got_fuzzy else '',
                 '%.3f' % world_alt_err if not math.isnan(world_alt_err) else '',  # M9.3
                 '1' if self.emerg else '0',   # M9.6 step 3: v6.26 emergency brake
+                # ── M12 Phase D-prep: controller's exact internal signals ──
+                f(self.ex_ctrl, '%.4f'), f(self.ey_ctrl, '%.4f'), f(self.ea_ctrl, '%.5f'),
+                f(self.dex, '%.4f'), f(self.dey, '%.4f'), f(self.dea, '%.5f'),
+                '%.0f' % self.ctrl_state,
             ])
             self.csv_file.flush()
             self.rate.sleep()
