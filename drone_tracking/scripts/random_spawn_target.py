@@ -159,7 +159,14 @@ def main():
     # v3.2: same single draw for every zone (keeps per-seed reproducibility of
     # the other zones); clear-view zones remap it into their allowed sector.
     yaw_draw = random.uniform(-math.pi, math.pi)
-    if zone_key in CLEAR_VIEW_YAW:
+    # ~spawn_yaw (deg) OVERRIDE: point both drones a fixed direction (e.g. off
+    # the island toward open ground) so a straight-forward target never hits
+    # trees. 999 = disabled (use the zone/random yaw). Draw still consumed above
+    # to keep per-seed reproducibility of everything else.
+    spawn_yaw_deg = float(rospy.get_param('~spawn_yaw', 999.0))
+    if spawn_yaw_deg < 400:
+        chaser_yaw = math.radians(spawn_yaw_deg)
+    elif zone_key in CLEAR_VIEW_YAW:
         clear, half = CLEAR_VIEW_YAW[zone_key]
         chaser_yaw = clear + (yaw_draw / math.pi) * half
     else:

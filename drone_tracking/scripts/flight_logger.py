@@ -84,6 +84,16 @@ class FlightLogger:
         self.target_wy = float('nan')
         self.target_wz = float('nan')
         self.got_gazebo = False
+        # ── 2026-07-07: ground-truth in-FOV flag ─────────────────────
+        # Chaser orientation from Gazebo (same frame as the positions), LOS
+        # rotated world->body->camera. Camera model per the 2026-06 gt work:
+        # fx=277.19 is what the live optics actually follow (SDF hfov 70 deg is
+        # NOT rendered), mount pitched 5 deg down (fpv_cam.sdf pose 0.0873).
+        self.chaser_qx = self.chaser_qy = float('nan')
+        self.chaser_qz = self.chaser_qw = float('nan')
+        self.CAM_PITCH = 0.0873                       # rad, mount pitch (down)
+        self.HALF_H = math.atan(320.0 / 277.19)       # ±49.1 deg
+        self.HALF_V = math.atan(240.0 / 277.19)       # ±40.9 deg
 
         # ── RAW YOLO ─────────────────────────────────────────────────
         self.raw_cx = self.raw_cy = 0.0
@@ -151,6 +161,14 @@ class FlightLogger:
             'ex_ctrl', 'ey_ctrl', 'ea_ctrl',  # errors AS THE CONTROLLER SAW THEM (per-config)
             'dex', 'dey', 'dea',              # error derivatives (headline C1-vs-C2 signal)
             'ctrl_state',                     # 1 REAL / 2 PRED / 0 none this cycle
+            # ── 2026-07-07: per-axis Gazebo separation (world frame, END-appended)
+            'gz_dx', 'gz_dy', 'gz_dz',        # target - chaser (m); norm = true_dist_3d
+            # ── 2026-07-07: ground-truth camera-FOV geometry ──
+            'in_fov',                         # '1' target inside camera FOV (Gazebo GT)
+            'fov_az_deg', 'fov_el_deg',       # LOS angles in the camera frame
+            # ── 2026-07-07: absolute Gazebo world positions (trajectory GT) ──
+            'chaser_wx', 'chaser_wy', 'chaser_wz',
+            'target_wx', 'target_wy', 'target_wz',
         ])
 
         # ── Subscribers ──────────────────────────────────────────────
@@ -238,6 +256,9 @@ class FlightLogger:
             self.chaser_wx = msg.pose[ic].position.x
             self.chaser_wy = msg.pose[ic].position.y
             self.chaser_wz = msg.pose[ic].position.z
+            q = msg.pose[ic].orientation
+            self.chaser_qx, self.chaser_qy = q.x, q.y
+            self.chaser_qz, self.chaser_qw = q.z, q.w
         except (ValueError, IndexError): pass
         try:
             it = msg.name.index('target_iris')
@@ -282,15 +303,43 @@ class FlightLogger:
                 dist_3d = float('nan')
 
             # True Gazebo world-frame distance (M8.2)
+            # 2026-07-07: per-axis components kept (gz_d* columns, target-chaser)
             if self.got_gazebo:
-                dx = self.chaser_wx - self.target_wx
-                dy = self.chaser_wy - self.target_wy
-                dz = self.chaser_wz - self.target_wz
-                true_dist_3d  = math.sqrt(dx*dx + dy*dy + dz*dz)
+                gz_dx = self.target_wx - self.chaser_wx
+                gz_dy = self.target_wy - self.chaser_wy
+                gz_dz = self.target_wz - self.chaser_wz
+                true_dist_3d  = math.sqrt(gz_dx*gz_dx + gz_dy*gz_dy + gz_dz*gz_dz)
                 world_alt_err = self.chaser_wz - self.target_wz   # M9.3
             else:
+                gz_dx = gz_dy = gz_dz = float('nan')
                 true_dist_3d  = float('nan')
                 world_alt_err = float('nan')
+
+            # Ground-truth in-FOV (2026-07-07): LOS world->body (chaser
+            # quaternion from Gazebo) -> camera (5 deg down mount), then
+            # compare az/el against the fx=277 half-angles.
+            in_fov = ''; fov_az = fov_el = float('nan')
+            if self.got_gazebo and not math.isnan(self.chaser_qw):
+                qx, qy, qz, qw = (self.chaser_qx, self.chaser_qy,
+                                  self.chaser_qz, self.chaser_qw)
+                # body = R(q)^T · rel  (rows of R^T = columns of R)
+                bx = ((1 - 2*(qy*qy + qz*qz)) * gz_dx +
+                      (2*(qx*qy + qz*qw))     * gz_dy +
+                      (2*(qx*qz - qy*qw))     * gz_dz)
+                by = ((2*(qx*qy - qz*qw))     * gz_dx +
+                      (1 - 2*(qx*qx + qz*qz)) * gz_dy +
+                      (2*(qy*qz + qx*qw))     * gz_dz)
+                bz = ((2*(qx*qz + qy*qw))     * gz_dx +
+                      (2*(qy*qz - qx*qw))     * gz_dy +
+                      (1 - 2*(qx*qx + qy*qy)) * gz_dz)
+                cp, sp = math.cos(self.CAM_PITCH), math.sin(self.CAM_PITCH)
+                xc = cp*bx - sp*bz          # camera frame (5 deg down mount)
+                yc = by
+                zc = sp*bx + cp*bz
+                fov_az = math.atan2(yc, xc)
+                fov_el = math.atan2(zc, math.hypot(xc, yc))
+                in_fov = '1' if (xc > 0 and abs(fov_az) <= self.HALF_H
+                                 and abs(fov_el) <= self.HALF_V) else '0'
 
             def f(v, fmt='%.3f'):
                 return fmt % v if not math.isnan(v) else ''
@@ -334,6 +383,15 @@ class FlightLogger:
                 f(self.ex_ctrl, '%.4f'), f(self.ey_ctrl, '%.4f'), f(self.ea_ctrl, '%.5f'),
                 f(self.dex, '%.4f'), f(self.dey, '%.4f'), f(self.dea, '%.5f'),
                 '%.0f' % self.ctrl_state,
+                # ── 2026-07-07: per-axis Gazebo separation (target - chaser) ──
+                f(gz_dx), f(gz_dy), f(gz_dz),
+                # ── 2026-07-07: ground-truth camera-FOV geometry ──
+                in_fov,
+                f(math.degrees(fov_az), '%.1f') if not math.isnan(fov_az) else '',
+                f(math.degrees(fov_el), '%.1f') if not math.isnan(fov_el) else '',
+                # ── absolute Gazebo world positions (trajectory ground truth) ──
+                f(self.chaser_wx), f(self.chaser_wy), f(self.chaser_wz),
+                f(self.target_wx), f(self.target_wy), f(self.target_wz),
             ])
             self.csv_file.flush()
             self.rate.sleep()

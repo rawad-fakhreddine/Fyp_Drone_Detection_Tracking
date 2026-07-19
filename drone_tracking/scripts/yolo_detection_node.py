@@ -86,7 +86,7 @@ import torch
 from collections import deque
 import numpy as np
 from sensor_msgs.msg import Image
-from geometry_msgs.msg import Point, Quaternion
+from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 from ultralytics import YOLO
@@ -153,6 +153,9 @@ class YoloNode:
             '/drone_tracking/detector_status', String, queue_size=1)
         rospy.Subscriber(
             '/iris/usb_cam/image_raw', Image, self.callback, queue_size=1)
+        # NOTE: pitch stabilization was attempted here but the pose callback is
+        # starved by YOLO inference holding the GIL -> pitch stayed ~0. It is
+        # done in the IBVS controller instead (which services pose reliably).
 
         rospy.loginfo("[YOLO] v3.4 | model=%s | device=%s | conf track/acquire=%.2f/%.2f"
                       " | class=%d | alpha_median=%d frames"
@@ -260,6 +263,9 @@ class YoloNode:
                 smooth_alpha = float(np.median(self._alpha_buf))
 
                 p.x = raw_cx        # centroid X — unsmoothed, Kalman handles it
+                # Pitch stabilization was tried HERE but the pose callback is
+                # starved by YOLO inference holding the GIL (pitch stayed ~0),
+                # so it's done in the controller instead (services pose fine).
                 p.y = raw_cy        # centroid Y — unsmoothed, Kalman handles it
                 p.z = smooth_alpha  # bbox area  — median-smoothed here
                 # Publish actual w,h for debug viewer (other nodes unaffected)

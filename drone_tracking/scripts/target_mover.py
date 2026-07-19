@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-target_mover.py  —  v10.6  Speed [1.0,3.5] + Phi-Adaptive Maneuvers
+target_mover.py  —  v10.10  Trajectory-audit fixes (T2/T3 one-way, T6/T7 shuttle, T8 periodic)
 =====================================================================
 AI-Based Drone-to-Drone Detection and Tracking
 Rawad Fakhredine | FYP Masters in Robotics | Supervisor: Ibrahim Sammour
@@ -194,6 +194,7 @@ class TargetMover:
     SOFT_RADIUS=45.0; HARD_RADIUS=120.0; MAX_REPULSION_OMEGA=15.0
     SAFETY_RADIUS=3.0; BLEND_MAX_DIST=12.0
     STRAIGHT_MAX_DIST=60.0; TRAJ2_SPEED=1.0; TRAJ3_SPEED=3.5
+    INCLINE_MAX_DIST=60.0   # v10.10: T6/T7 horizontal shuttle half-length (m)
     CIRCLE_R=8.; CIRCLE_T=25.; LEMN_A=8.; LEMN_T=40.
     INCLINE_A_SPEED=2.; INCLINE_A_SLOPE=15.; INCLINE_B_SPEED=3.; INCLINE_B_SLOPE=35.
     HELIX_R=8.; HELIX_T=25.; HELIX_VZ=0.15; HELIX_HALF_TIME=50.
@@ -207,6 +208,21 @@ class TargetMover:
     def __init__(self):
         rospy.init_node('target_mover')
         self.trajectory=int(rospy.get_param('~trajectory',9))
+        # v10.7: T2/T3 straight-line azimuth mode. 'random' (default) =
+        # baseline seeded draw; 'away' = directly away from the chaser
+        # (world bearing chaser->target at trajectory start); a number =
+        # fixed world azimuth in degrees.
+        self._straight_az=str(rospy.get_param('~straight_az','random'))
+        # v10.10 (trajectory audit, Rawad decision): official T2/T3 = ONE-WAY
+        # straight (never reverses) with SHORTER mission durations so the path
+        # fits the island — the old 60 m shuttle default was a containment
+        # hack whose reversal flew the target back THROUGH the chaser.
+        # ~straight_max=60 remains available as a diagnostic override.
+        self._straight_max=float(rospy.get_param('~straight_max',99999.0))
+        # v10.9: lateral offset between the out/return legs (racetrack) so the
+        # target does not fly back THROUGH the chaser. 0 = old exact reversal.
+        self._straight_offset=float(rospy.get_param('~straight_offset',0.0))
+        self._lat_target=self._straight_offset/2.0
         seed = rospy.get_param('~seed', -1)
         if seed >= 0:
             random.seed(int(seed))
@@ -223,6 +239,7 @@ class TargetMover:
         self.rise_start_time=self.settle_start_time=self.motion_start_time=None
         self._traj_init_done=False; self._traj_azimuth=self._traj_phase0=0.
         self._straight_dir=1.; self._straight_start_x=self._straight_start_y=0.
+        self._straight_start_z=0.; self._z_rate=0.; self._prev_pz=0.
         self._incline_vz_dir=1.
         self.heading=0.; self.speed_ema=0.5; self.vz_ema=0.
         self.hdg_perturb=0.; self._last_phi_high=False
@@ -261,7 +278,7 @@ class TargetMover:
         N={1:"Static Hover",2:"Slow Straight",3:"Fast Straight",4:"Circle",
            5:"Lemniscate",6:"Incline Med",7:"Incline Hard",8:"Helix",
            9:"Fuzzy+Weave v10.6"}
-        rospy.loginfo("[TargetMover] v10.6 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
+        rospy.loginfo("[TargetMover] v10.10 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
                       % (self.trajectory, N[self.trajectory],
                          self.Z_FLOOR, self.Z_CEIL, self.RISE_TO_Z))
         self.rate=rospy.Rate(50); self._run()
@@ -320,9 +337,36 @@ class TargetMover:
     # ── Trajectory init/dispatch ──────────────────────────────────────
     def _init_trajectory(self):
         self._traj_azimuth=random.uniform(0,2*math.pi)
+        # v10.7: optional T2/T3 azimuth override. The random draw above is
+        # ALWAYS consumed first, so every other seeded value stays identical
+        # per seed (same discipline as the v3.2 CLEAR_VIEW_YAW remap).
+        # v10.10: azimuth steering extended to T6/T7 (their shuttle azimuth was
+        # an uncontrollable random draw -> could point into the tree line)
+        if self.trajectory in (2,3,6,7) and self._straight_az!='random':
+            if self._straight_az=='away':
+                if self._got_world_pos:
+                    self._traj_azimuth=math.atan2(
+                        self.world_y-self.chaser_world_y,
+                        self.world_x-self.chaser_world_x)
+                    rospy.loginfo("[TargetMover] v10.7 straight_az=away -> "
+                                  "%.0f deg world (directly away from chaser)"
+                                  %math.degrees(self._traj_azimuth))
+                else:
+                    rospy.logwarn("[TargetMover] straight_az=away but no world "
+                                  "pose yet — keeping the random azimuth")
+            else:
+                try:
+                    self._traj_azimuth=math.radians(float(self._straight_az))
+                    rospy.loginfo("[TargetMover] v10.7 straight_az fixed at "
+                                  "%s deg (world)"%self._straight_az)
+                except ValueError:
+                    rospy.logwarn("[TargetMover] bad ~straight_az '%s' — "
+                                  "keeping the random azimuth"%self._straight_az)
         self._traj_phase0=random.uniform(0,2*math.pi)
         self._straight_dir=1.
         self._straight_start_x=self.pos_x; self._straight_start_y=self.pos_y
+        self._straight_start_z=self.pos_z   # v10.7: z-hold reference
+        self._prev_pz=self.pos_z; self._z_rate=0.
         self._incline_vz_dir=1.
         if self.trajectory==9:
             self.heading=self.yaw; self.speed_ema=0.5; self.vz_ema=0.
@@ -351,13 +395,34 @@ class TargetMover:
 
     # ── Trajectories 1-8 ─────────────────────────────────────────────
     def _ts(self,spd):
+        az=self._traj_azimuth
+        # along-track distance travelled from the leg start
         dx=self.pos_x-self._straight_start_x; dy=self.pos_y-self._straight_start_y
-        if math.hypot(dx,dy)>self.STRAIGHT_MAX_DIST and self._straight_dir==1.:
+        along=dx*math.cos(az)+dy*math.sin(az)
+        if abs(along)>self._straight_max and self._straight_dir==1.:
             self._straight_dir=-1.
-        elif math.hypot(dx,dy)<2. and self._straight_dir==-1.:
+            # v10.9: on reversal, offset the return leg LATERALLY so the target
+            # does NOT retrace straight back THROUGH the chaser (that head-on
+            # pass made a 6-8 m band + 4 m floor physically impossible). It flips
+            # between +/- straight_offset/2, forming a racetrack of parallel
+            # lines. straight_offset=0 -> exact old back-and-forth.
+            self._lat_target=-self._lat_target
+        elif abs(along)<2. and self._straight_dir==-1.:
             self._straight_dir=1.
+            self._lat_target=-self._lat_target
         v=spd*self._straight_dir
-        return v*math.cos(self._traj_azimuth),v*math.sin(self._traj_azimuth),0.,0.
+        # perpendicular steering toward the current lateral offset line
+        px,py=-math.sin(az),math.cos(az)                 # unit perpendicular
+        lat_pos=dx*px+dy*py
+        v_perp=max(-1.0,min(1.0,0.6*(self._lat_target-lat_pos)))
+        vx=v*math.cos(az)+v_perp*px
+        vy=v*math.sin(az)+v_perp*py
+        # v10.8: DAMPED (PD) altitude hold (kills the ~0.7 m altitude wave).
+        z_err=self._straight_start_z-self.pos_z
+        self._z_rate=0.6*self._z_rate+0.4*(self.pos_z-self._prev_pz)/0.02
+        self._prev_pz=self.pos_z
+        vz=max(-0.7,min(0.7, 0.8*z_err - 0.5*self._z_rate))
+        return vx,vy,vz,0.
 
     def _tc(self,e):
         w=2*math.pi/self.CIRCLE_T; p=w*e+self._traj_phase0
@@ -368,22 +433,39 @@ class TargetMover:
         return self.LEMN_A*w*math.cos(w*e),self.LEMN_A*w*math.cos(2*w*e),0.,0.
 
     def _ti(self,spd,sl_deg):
+        # v10.10 (trajectory audit): T6/T7 horizontal leg is now a SHUTTLE
+        # bounded at INCLINE_MAX_DIST (they flew one-way on a random azimuth
+        # and left the island inside a 300 s run — T1-T8 have NO boundary
+        # repulsion, that layer is T9-only). Vertical bounce unchanged.
         sl=math.radians(sl_deg); lat=spd*math.cos(sl); vb=spd*math.sin(sl)
         if self._incline_vz_dir>0 and self.pos_z>=self.Z_CEIL-1:
             self._incline_vz_dir=-1.
         elif self._incline_vz_dir<0 and self.pos_z<=self.Z_FLOOR+1:
             self._incline_vz_dir=1.
-        return (lat*math.cos(self._traj_azimuth),
-                lat*math.sin(self._traj_azimuth),
+        az=self._traj_azimuth
+        dx=self.pos_x-self._straight_start_x; dy=self.pos_y-self._straight_start_y
+        along=dx*math.cos(az)+dy*math.sin(az)
+        if abs(along)>self.INCLINE_MAX_DIST and self._straight_dir==1.:
+            self._straight_dir=-1.
+        elif abs(along)<2. and self._straight_dir==-1.:
+            self._straight_dir=1.
+        return (lat*math.cos(az)*self._straight_dir,
+                lat*math.sin(az)*self._straight_dir,
                 vb*self._incline_vz_dir, 0.)
 
     def _th(self,e):
+        # v10.10 (trajectory audit): vz was a single up-then-down keyed on the
+        # hardcoded HELIX_HALF_TIME=50 s — after ~130 s the target sat on the
+        # Z floor and T8 degenerated into a FLAT circle (a T4 duplicate) for
+        # the rest of the run. Now a continuous triangle-wave bounce between
+        # the Z bounds, matching the spec "continuous ascent+descent".
         w=2*math.pi/self.HELIX_T; p=w*e+self._traj_phase0
         vx=-self.HELIX_R*w*math.sin(p); vy=self.HELIX_R*w*math.cos(p)
-        vz=self.HELIX_VZ if e<self.HELIX_HALF_TIME else -self.HELIX_VZ
-        if self.pos_z>=self.Z_CEIL and vz>0:  vz=0.
-        if self.pos_z<=self.Z_FLOOR and vz<0: vz=0.
-        return vx,vy,vz,0.
+        if self._incline_vz_dir>0 and self.pos_z>=self.Z_CEIL-1:
+            self._incline_vz_dir=-1.
+        elif self._incline_vz_dir<0 and self.pos_z<=self.Z_FLOOR+1:
+            self._incline_vz_dir=1.
+        return vx,vy,self.HELIX_VZ*self._incline_vz_dir,0.
 
     # ── Fuzzy helpers ─────────────────────────────────────────────────
     def _get_3d_distance(self):

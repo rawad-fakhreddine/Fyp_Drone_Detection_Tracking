@@ -50,3 +50,9 @@ rosclean purge -y >/dev/null 2>&1
 find /tmp -maxdepth 1 -name 'T*_zone*' -mtime +7 -delete 2>/dev/null
 
 echo "[cleanup] done — stack down, ports checked"
+
+# fan_boost: sim is down -> Windows power plan back to Balanced (quiet fans).
+# FAN_KEEP=1 skips the restore (batch runners relaunch within seconds).
+if [ "${FAN_KEEP:-0}" != "1" ]; then
+    bash "$(dirname "$0")/fan_boost.sh" off 2>/dev/null || true
+fi

@@ -9,8 +9,15 @@
 #   DURATION : seconds (default 300)
 # Env knobs:
 #   VIEWER=0        : skip the YOLO debug viewer (default on)
+#   VIEWER_SCALE=N  : viewer display upscale (default 1.0 = native 640x480)
+#   VIEWER_HZ=N     : viewer render rate (default 30 = camera rate)
 #   START_DIST=N    : spawn separation in m (default: random 8-12)
 #   LOSS_TIMEOUT=N  : abort run after N s continuous SEARCH (default 10)
+#   ALPHA_STAR / DEAD_ZONE / EA_HOLD : IBVS standoff knobs (defaults = baseline)
+#   VX_MODE=pid     : v6.31 distance-domain vx PID (default legacy = baseline)
+#   D_STAR / KP_VX / KI_VX / HOLD_D_TOL : vx PID knobs (8.0 / 1.0 / 0.0 / 1.0)
+#   ALPHA_DIST_K=N  : alpha->distance constant (0.0625; measured 0.084 on T3/z1)
+#   SIZE_GATE=off   : disable the detector's size/aspect plausibility filter
 # =============================================================================
 set -u
 
@@ -111,6 +118,16 @@ wait_sim_time() {   # wait_sim_time MIN_SIM_SECS TIMEOUT — EKF settle gate
 # sitl is required="true" in posix_sitl.launch, so that single EOF tore down
 # master + Gazebo and killed every later node (the real cause of the
 # "chaser PX4 dies at T5/T10" failures). interactive:=false runs px4 with -d.
+# T0 — Windows power plan -> High performance while the sim runs (fan curve
+# ramps under load; restored to Balanced by cleanup.sh). FAN_BOOST=0 disables.
+if [ "${FAN_BOOST:-1}" = "1" ]; then
+    bash "$PKG_DIR/scripts/fan_boost.sh" on
+    echo "[T0] Windows power plan -> High performance (FAN_BOOST=0 to skip)"
+fi
+# T0b — code provenance: stamp WHICH code + scenario env flies this run
+# (Rawad's directive 2026-07-17: revise by fact, not by guessing).
+bash "$PKG_DIR/scripts/code_stamp.sh" "$RESULTS_DIR/$RUN_TAG" 2>/dev/null || true
+
 echo "[T1] Gazebo + Chaser PX4 + MAVROS..."
 roslaunch $PX4_HOME/launch/mavros_posix_sitl.launch \
     vehicle:=iris \
@@ -129,22 +146,58 @@ sleep 5
 # START_DIST overrides the spawn separation (default -1 → node picks 8-12m)
 echo "[T2] Spawning target + positioning chaser (zone=$ZONE seed=$SEED dist=${START_DIST:--1})..."
 rosrun drone_tracking random_spawn_target.py _zone:=$ZONE _seed:=$SEED \
-    _dist:=${START_DIST:--1} \
+    _dist:=${START_DIST:--1} _spawn_yaw:=${SPAWN_YAW:-999} \
     > /tmp/T2_${RUN_TAG}.log 2>&1 &
 sleep 4
 
 # T3 — YOLO
-echo "[T3] YOLO detection node..."
-rosrun drone_tracking yolo_detection_node.py > /tmp/T3_${RUN_TAG}.log 2>&1 &
+# SIZE_GATE=off opens the v3.3 plausibility bounds wide (size/aspect filter
+# disabled; persistence gate + conf hysteresis stay). A/B knob — measured
+# rejects were 0/100f on T3/zone1, but this lets it be verified per-run.
+if [ "${SIZE_GATE:-on}" = "off" ]; then
+    echo "[T3] YOLO detection node (SIZE_GATE=off — plausibility filter open)..."
+    DET_GATE_ARGS="_min_box_px:=0 _max_box_px:=100000 _aspect_min:=0.001 _aspect_max:=1000"
+else
+    echo "[T3] YOLO detection node..."
+    DET_GATE_ARGS=""
+fi
+rosrun drone_tracking yolo_detection_node.py $DET_GATE_ARGS > /tmp/T3_${RUN_TAG}.log 2>&1 &
 sleep 3
 
 # TV — YOLO debug viewer (live detection overlay window; default OFF so batch
 # runs stay headless. VIEWER=1 opens the window). Killed by cleanup.sh.
 if [ "${VIEWER:-0}" = "1" ]; then
     echo "[TV] YOLO debug viewer (VIEWER=1)..."
-    rosrun drone_tracking yolo_debug_viewer.py > /tmp/TV_${RUN_TAG}.log 2>&1 &
+    rosrun drone_tracking yolo_debug_viewer.py \
+        _scale:=${VIEWER_SCALE:-1.0} _hz:=${VIEWER_HZ:-30} \
+        > /tmp/TV_${RUN_TAG}.log 2>&1 &
 else
     echo "[TV] Viewer SKIPPED (VIEWER=0 / default headless)"
+fi
+
+# SNAP — headless periodic camera-view snapshots (SNAP=1). Saves annotated
+# PNGs every SNAP_INTERVAL (default 3) sim-s into a per-run folder for offline
+# visual inspection. Independent of the debug VIEWER window.
+if [ "${SNAP:-0}" = "1" ]; then
+    SNAP_DIR="$RESULTS_BASE/screenshots/${CFG_DIR}_${RUN_TAG}"
+    echo "[SNAP] Snapshot node -> $SNAP_DIR"
+    rosrun drone_tracking sim_snapshot.py \
+        _snap_dir:="$SNAP_DIR" _snap_interval:=${SNAP_INTERVAL:-3.0} \
+        > /tmp/SNAP_${RUN_TAG}.log 2>&1 &
+    echo "$SNAP_DIR" > /tmp/last_snap_dir.txt
+fi
+
+# RC — headless demo mp4 recorder (RECORD=1). Annotated chaser-camera view
+# (raw box/conf/state/phase/FOV/GT-dist), starts at takeoff_ready, finalized
+# on teardown. RECORD_SCALE upscales for readability (default 1.5).
+if [ "${RECORD:-0}" = "1" ]; then
+    REC_DIR="$RESULTS_BASE/demo_videos"
+    mkdir -p "$REC_DIR"
+    REC_PATH="$REC_DIR/${CFG_DIR}_${RUN_TAG}.mp4"
+    echo "[RC] Demo recorder -> $REC_PATH"
+    rosrun drone_tracking demo_recorder.py \
+        _out:="$REC_PATH" _scale:=${RECORD_SCALE:-1.0} \
+        > /tmp/RC_${RUN_TAG}.log 2>&1 &
 fi
 
 # T4 — Kalman (configs 2, 3 only)
@@ -186,17 +239,59 @@ wait_topic "/target/mavros/state" 30 || { bash $PKG_DIR/scripts/cleanup.sh; exit
 # Gazebo on TCP 4561 and rcS completed — heartbeats only start after that),
 # i.e. the lockstep freeze is over and sim time is advancing again.
 wait_fcu "/target/mavros/state" 60 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1; }
+# 2026-07-11 trajectory audit: PX4 default MPC_Z_VEL_MAX_DN=1.0 capped the
+# TARGET's descent -> T7 flew 22.7 deg instead of the 35 spec (needs vz=1.72;
+# climb legs were fine at 34.5). Raise the target's descent limit to 2.0.
+# NB also uncaps T9 evasion dives (fuzzy commands down to -2) -> T9 baseline note.
+# retry: the param service is only available once MAVROS finishes its FCU
+# param sync (a few seconds after connect); a single immediate call failed.
+ZDN_OK=0
+for _i in 1 2 3 4 5 6; do
+  if rosrun mavros mavparam -n /target/mavros set MPC_Z_VEL_MAX_DN 2.0 >/dev/null 2>&1; then
+    ZDN_OK=1; echo "  target MPC_Z_VEL_MAX_DN=2.0 (try $_i)"; break
+  fi
+  sleep 5
+done
+[ "$ZDN_OK" = "1" ] || echo "  WARN: target Z_VEL_MAX_DN set failed after retries"
+# CHASER descent cap (T6/T7/T8 vertical trajectories ONLY, env-gated:
+# CHASER_ZDN=2.5). NOT unconditional: the 2026-07-11 regression-gate failure
+# showed the flat-T3 bench destabilized (pitch +/-10 deg, dist std 1.6) with
+# it set — and PX4 persists mavparam writes to eeprom, so it leaked across
+# runs. Default = explicitly RESTORE the PX4 default 1.0 every run.
+CZDN=${CHASER_ZDN:-1.0}
+for _i in 1 2 3 4 5 6; do
+  if rosrun mavros mavparam set MPC_Z_VEL_MAX_DN "$CZDN" >/dev/null 2>&1; then
+    echo "  chaser MPC_Z_VEL_MAX_DN=$CZDN (try $_i)"; break
+  fi
+  sleep 5
+done
 sleep 3
 
 # T7 — IBVS
 echo "[T7] IBVS (use_ppo=$USE_PPO detection_source=$DET_SRC)..."
 rosrun drone_tracking ibvs_controller_node.py \
     _use_ppo:=$USE_PPO _detection_source:=$DET_SRC \
+    _pred_vx_hold:=${PRED_VX_HOLD:-1} _pred_accel_max:=${PRED_ACCEL_MAX:-1.0} _d_safe_margin:=${D_SAFE_MARGIN:-1.0} \
     _search_latch:=${SEARCH_LATCH:-false} _search_tau:=${SEARCH_TAU:-1.0} \
-    _Kp_wz:=${KP_WZ:-0.9} _Kp_y:=${KP_Y:-1.8} \
+    _Kp_wz:=${KP_WZ:-2.0} _Kp_y:=${KP_Y:-0.4} \
     _Kp_z:=${KP_Z:-3.0} _max_vz:=${MAX_VZ:-1.5} \
+    _Ki_z:=${KI_Z:-0.04} _int_z_max:=${INT_Z_MAX:-0.2} _int_z_bleed:=${INT_Z_BLEED:-1.0} \
     _lambda_x:=${LAMBDA_X:-1.0} _lambda_y:=${LAMBDA_Y:-1.0} \
     _lambda_z:=${LAMBDA_Z:-1.0} _lambda_wz:=${LAMBDA_WZ:-1.0} \
+    _alpha_star:=${ALPHA_STAR:-0.0067} _dead_zone:=${DEAD_ZONE:-0.002} \
+    _ea_hold:=${EA_HOLD:-0.010} \
+    _vx_mode:=${VX_MODE:-pid} _d_star:=${D_STAR:-8.0} \
+    _Kp_vx:=${KP_VX:-2.5} _Ki_vx:=${KI_VX:-1.2} _Kd_vx:=${KD_VX:-1.5} _vx_ff:=${VX_FF:-0.0} _vff_lpf:=${VFF_LPF:-0.9} \
+    _int_d_max:=${INT_D_MAX:-6.0} _int_band:=${INT_BAND:-2.5} _int_bleed:=${INT_BLEED:-1.0} _int_hold_only:=${INT_HOLD_ONLY:-1} _band_kp:=${BAND_KP:-0.4} \
+    _hold_d_tol:=${HOLD_D_TOL:-1.0} _alpha_dist_k:=${ALPHA_DIST_K:-0.096} \
+    _d_emerg:=${D_EMERG:-0.0} _d_lpf:=${D_LPF:-0.5} _a_dec:=${A_DEC:-2.0} \
+    _d_hold_min:=${D_HOLD_MIN:-6.0} _d_hold_max:=${D_HOLD_MAX:-7.0} \
+    _min_dist:=${MIN_DIST:-2.5} _emerg_vy:=${EMERG_VY:-2.0} \
+    _emerg_brake_vx:=${EMERG_BRAKE_VX:-4.0} \
+    _max_accel:=${MAX_ACCEL:-3.0} _max_accel_fast:=${MAX_ACCEL_FAST:-8.0} \
+    _alt_floor:=${ALT_FLOOR:-11.0} \
+    _max_vx_retreat_pid:=${MAX_VX_RETREAT_PID:-2.5} _max_vx:=${MAX_VX:-8.0} \
+    _pitch_comp:=${PITCH_COMP:-1.3} _deriv_lpf:=${DERIV_LPF:-0.6} \
     > /tmp/T7_${RUN_TAG}.log 2>&1 &
 sleep 2
 
@@ -230,6 +325,8 @@ sleep 2
 # T11 — Target mover
 echo "[T11] Target mover (trajectory=$TRAJ seed=$SEED)..."
 rosrun drone_tracking target_mover.py _trajectory:=$TRAJ _seed:=$SEED \
+    _straight_az:=${STRAIGHT_AZ:-random} _straight_max:=${STRAIGHT_MAX:-60} \
+    _straight_offset:=${STRAIGHT_OFFSET:-0.0} \
     > /tmp/T11_${RUN_TAG}.log 2>&1 &
 sleep 1
 
@@ -241,10 +338,26 @@ sleep 1
 # metric and biases against Config 1 (raw mode drops out more, recovers
 # slower); a 60 s abort is itself a recorded outcome (aborted=1 in summary).
 LOSS_TIMEOUT="${LOSS_TIMEOUT:-10}"
+# Stuck-target watchdog: if the target's Gazebo world position stops changing
+# (hit a tree / terrain and wedged) for STUCK_TIMEOUT consecutive seconds, the
+# run is dead — abort. Only for MOVING trajectories (T1 is a static hover, so
+# a frozen position there is correct). Reads target_wx/wy by header name.
+STUCK_TIMEOUT="${STUCK_TIMEOUT:-8}"
+MOVING_TRAJ=1; [ "$TRAJ" = "1" ] && MOVING_TRAJ=0
+get_tgt_xy() {   # prints "x y" of the target from the last logged row
+    python3 -c "
+import csv
+try:
+    rows=list(csv.DictReader(open('$HOME/flight_log_latest.csv')))
+    r=rows[-1]; print(r.get('target_wx','') or 'nan', r.get('target_wy','') or 'nan')
+except Exception: print('nan nan')
+" 2>/dev/null
+}
 echo ""
-echo "  >>> Mission running for ${DURATION}s (loss watchdog ${LOSS_TIMEOUT}s) <<<"
+echo "  >>> Mission running for ${DURATION}s (loss ${LOSS_TIMEOUT}s, stuck ${STUCK_TIMEOUT}s) <<<"
 SIM_T0=$(tail -n 1 ~/flight_log_latest.csv 2>/dev/null | cut -d, -f1)
-ELAPSED=0; LOST=0; ABORT_REASON=""; ACQUIRED=0
+ELAPSED=0; LOST=0; STUCK=0; ABORT_REASON=""; ACQUIRED=0
+PREV_TX=""; PREV_TY=""
 while [ $ELAPSED -lt $DURATION ]; do
     sleep 5; ELAPSED=$((ELAPSED+5))
     PHASE=$(tail -n 1 ~/flight_log_latest.csv 2>/dev/null | cut -d, -f2)
@@ -260,6 +373,25 @@ while [ $ELAPSED -lt $DURATION ]; do
     if [ $LOST -ge $LOSS_TIMEOUT ]; then
         ABORT_REASON="target lost — SEARCH for ${LOST}s (>= ${LOSS_TIMEOUT}s)"
         break
+    fi
+    # stuck-target check (moving trajectories only, after acquisition)
+    if [ $MOVING_TRAJ -eq 1 ] && [ $ACQUIRED -eq 1 ]; then
+        read TX TY < <(get_tgt_xy)
+        if [ -n "$PREV_TX" ] && [ "$TX" != "nan" ] && [ "$PREV_TX" != "nan" ]; then
+            MOVED=$(awk -v a="$TX" -v b="$TY" -v c="$PREV_TX" -v d="$PREV_TY" \
+                    'BEGIN{printf "%.2f", sqrt((a-c)^2+(b-d)^2)}')
+            # <0.4 m over 5 s = ~stationary (a 3.5 m/s target covers ~17 m)
+            if awk -v m="$MOVED" 'BEGIN{exit !(m<0.4)}'; then
+                STUCK=$((STUCK+5))
+            else
+                STUCK=0
+            fi
+        fi
+        PREV_TX="$TX"; PREV_TY="$TY"
+        if [ $STUCK -ge $STUCK_TIMEOUT ]; then
+            ABORT_REASON="target STUCK ${STUCK}s (>= ${STUCK_TIMEOUT}s) — tree/terrain strike"
+            break
+        fi
     fi
 done
 SIM_T1=$(tail -n 1 ~/flight_log_latest.csv 2>/dev/null | cut -d, -f1)
