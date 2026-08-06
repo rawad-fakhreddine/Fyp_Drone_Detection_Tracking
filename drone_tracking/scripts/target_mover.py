@@ -223,11 +223,29 @@ class TargetMover:
         # target does not fly back THROUGH the chaser. 0 = old exact reversal.
         self._straight_offset=float(rospy.get_param('~straight_offset',0.0))
         self._lat_target=self._straight_offset/2.0
+        # M-B trajectory-tracking feedback (2026-07-24): pull the REAL flown path
+        # onto the EXACT formula path. v = formula_feedforward + Kp*(ideal-actual).
+        # 0.0 = OFF = byte-for-byte legacy open-loop (unchanged matrix behaviour).
+        self._traj_track_kp=float(rospy.get_param('~traj_track_kp',0.0))
+        self._traj_track_cap=float(rospy.get_param('~traj_track_cap',2.5))
+        # M-B: T6/T7 as a SINGLE straight inclined leg (no vertical bounce, no
+        # horizontal shuttle). 0 = legacy bounce/shuttle. NB one-way climbs out
+        # of bounds fast (T7 ~1.72 m/s up), so pair with a SHORT DURATION.
+        self._incline_oneway=int(rospy.get_param('~incline_oneway',0))
+        # Option B (2026-08-02): T6/T7 fly FORWARD without reversing horizontally,
+        # keeping the vertical zig-zag (high-low). 0 = legacy horizontal SHUTTLE.
+        # NB forward-only leaves the island in ~25-30 s at 3 m/s -> use a SHORT
+        # duration or a larger zone.
+        self._incline_no_hreverse=int(rospy.get_param('~incline_no_hreverse',0))
+        # M-B lead compensation: aim the tracking feedback at the ideal point
+        # this many seconds in the FUTURE, to cancel the drone's velocity-tracking
+        # lag (the phase lag that makes the orbit radius read a few % too big).
+        self._traj_track_lead=float(rospy.get_param('~traj_track_lead',0.0))
         seed = rospy.get_param('~seed', -1)
         if seed >= 0:
             random.seed(int(seed))
             rospy.loginfo("[TargetMover] Seeded with %d" % int(seed))
-        if self.trajectory not in range(1,10): self.trajectory=9
+        if self.trajectory not in range(1,12): self.trajectory=9
         self.fuzzy=FuzzyEscaper()
         self.pos_x=self.pos_y=self.pos_z=0.; self.yaw=0.; self.got_pose=False
         self.chaser_x=self.chaser_y=self.chaser_z=0.; self.chaser_yaw=None
@@ -241,6 +259,7 @@ class TargetMover:
         self._straight_dir=1.; self._straight_start_x=self._straight_start_y=0.
         self._straight_start_z=0.; self._z_rate=0.; self._prev_pz=0.
         self._incline_vz_dir=1.
+        self._rw_wps=[]; self._rw_i=0; self._rw_speeds=[2.2]   # M-E random waypoints
         self.heading=0.; self.speed_ema=0.5; self.vz_ema=0.
         self.hdg_perturb=0.; self._last_phi_high=False
         self._prev_d=None; self._d_dot_ema=0.
@@ -277,10 +296,10 @@ class TargetMover:
 
         N={1:"Static Hover",2:"Slow Straight",3:"Fast Straight",4:"Circle",
            5:"Lemniscate",6:"Incline Med",7:"Incline Hard",8:"Helix",
-           9:"Fuzzy+Weave v10.6"}
-        rospy.loginfo("[TargetMover] v10.10 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f"
+           9:"Fuzzy+Weave v10.6",10:"Random Waypoints",11:"Random Wpts+Speed"}
+        rospy.loginfo("[TargetMover] v10.11 | T%d: %s | Z=[%.0f,%.0f] rise=%.0f | track_kp=%.2f"
                       % (self.trajectory, N[self.trajectory],
-                         self.Z_FLOOR, self.Z_CEIL, self.RISE_TO_Z))
+                         self.Z_FLOOR, self.Z_CEIL, self.RISE_TO_Z, self._traj_track_kp))
         self.rate=rospy.Rate(50); self._run()
 
     # ── Callbacks ─────────────────────────────────────────────────────
@@ -377,21 +396,92 @@ class TargetMover:
             self._vert_half_t=0.; self._vert_cycle=0
             self._vert_B=random.uniform(self.VERT_B_MIN, self.VERT_B_MAX)
             self._vert_Tz=random.uniform(self.VERT_T_MIN, self.VERT_T_MAX)
+        if self.trajectory in (10,11):
+            # M-E: seeded RANDOM waypoint path — reproducible per seed, NOT
+            # reactive to the chaser (unlike fuzzy T9). Fly to a sequence of
+            # random points around the spawn; loop them. T10 = constant speed;
+            # T11 = a RANDOM speed per segment too.
+            sx,sy=self._straight_start_x,self._straight_start_y
+            box=float(rospy.get_param('~rw_box',14.0))
+            zlo,zhi=self.Z_FLOOR+2.0,self.Z_CEIL-2.0
+            n=int(rospy.get_param('~rw_points',10))
+            self._rw_wps=[(sx+random.uniform(-box,box),
+                           sy+random.uniform(-box,box),
+                           random.uniform(zlo,zhi)) for _ in range(n)]
+            self._rw_i=0
+            if self.trajectory==11:               # random speed per segment
+                smin=float(rospy.get_param('~rw_speed_min',1.0))
+                smax=float(rospy.get_param('~rw_speed_max',2.8))
+                self._rw_speeds=[random.uniform(smin,smax) for _ in range(n)]
+            else:                                 # constant speed
+                self._rw_speeds=[float(rospy.get_param('~rw_speed',2.2))]*n
         self._traj_init_done=True
 
     def _get_traj_vel(self,elapsed,dt):
         if not self._traj_init_done: self._init_trajectory()
         t=self.trajectory
-        if   t==1: return 0.,0.,0.,0.
-        elif t==2: return self._ts(self.TRAJ2_SPEED)
-        elif t==3: return self._ts(self.TRAJ3_SPEED)
-        elif t==4: return self._tc(elapsed)
-        elif t==5: return self._tl(elapsed)
-        elif t==6: return self._ti(self.INCLINE_A_SPEED,self.INCLINE_A_SLOPE)
-        elif t==7: return self._ti(self.INCLINE_B_SPEED,self.INCLINE_B_SLOPE)
-        elif t==8: return self._th(elapsed)
+        if   t==1: vx,vy,vz,wz=0.,0.,0.,0.
+        elif t==2: vx,vy,vz,wz=self._ts(self.TRAJ2_SPEED)
+        elif t==3: vx,vy,vz,wz=self._ts(self.TRAJ3_SPEED)
+        elif t==4: vx,vy,vz,wz=self._tc(elapsed)
+        elif t==5: vx,vy,vz,wz=self._tl(elapsed)
+        elif t==6: vx,vy,vz,wz=self._ti(self.INCLINE_A_SPEED,self.INCLINE_A_SLOPE)
+        elif t==7: vx,vy,vz,wz=self._ti(self.INCLINE_B_SPEED,self.INCLINE_B_SLOPE)
+        elif t==8: vx,vy,vz,wz=self._th(elapsed)
+        elif t in (10,11): vx,vy,vz,wz=self._tr()
         elif t==9: return self._compute_fuzzy_velocity(dt)
-        return 0.,0.,0.,0.
+        else: return 0.,0.,0.,0.
+        # M-B trajectory-tracking position feedback: add Kp*(ideal-actual) so the
+        # REAL path fits the EXACT formula. Applied only to the pure-parametric
+        # trajectories whose ideal position is closed-form (T1 hold, T4 circle,
+        # T5 figure-8, T8 helix-xy). T2/T3/T6/T7 already track spec (they are
+        # position-referenced), so they are left byte-for-byte unchanged.
+        if self._traj_track_kp>0.0 and t in (1,4,5,8):
+            ix,iy,iz=self._ideal_pos(elapsed)
+            kp,cap=self._traj_track_kp,self._traj_track_cap
+            vx+=max(-cap,min(cap,kp*(ix-self.pos_x)))
+            vy+=max(-cap,min(cap,kp*(iy-self.pos_y)))
+            if t in (1,4,5):               # flat trajectories: hold start altitude
+                vz+=max(-cap,min(cap,kp*(iz-self.pos_z)))   # T8 z bounces -> no z-hold
+        return vx,vy,vz,wz
+
+    def _ideal_pos(self,e):
+        """Exact formula position (target local frame) at MOVING-elapsed e, for
+        the closed-form trajectories, anchored at the MOVING-start position.
+        Derived by integrating the formula velocity from e=0 (pos==anchor)."""
+        t=self.trajectory
+        e=e+self._traj_track_lead          # lead-compensate the plant lag
+        sx,sy,sz=self._straight_start_x,self._straight_start_y,self._straight_start_z
+        if t in (4,8):
+            R=self.CIRCLE_R if t==4 else self.HELIX_R
+            T=self.CIRCLE_T if t==4 else self.HELIX_T
+            w=2*math.pi/T; p0=self._traj_phase0
+            return (sx+R*(math.cos(w*e+p0)-math.cos(p0)),
+                    sy+R*(math.sin(w*e+p0)-math.sin(p0)), sz)
+        if t==5:
+            w=2*math.pi/self.LEMN_T
+            return (sx+self.LEMN_A*math.sin(w*e),
+                    sy+0.5*self.LEMN_A*math.sin(2*w*e), sz)
+        return sx,sy,sz                    # T1 hold at anchor
+
+    def _tr(self):
+        # M-E random-waypoint law: steer toward the current random waypoint at
+        # rw_speed; advance (and loop) when within 1.5 m. Uses only own position,
+        # so it is deterministic per seed and NOT reactive to the chaser.
+        if not self._rw_wps:
+            return 0., 0., 0., 0.
+        wx, wy, wz = self._rw_wps[self._rw_i]
+        dx, dy, dz = wx - self.pos_x, wy - self.pos_y, wz - self.pos_z
+        if math.sqrt(dx*dx + dy*dy + dz*dz) < 1.5:
+            self._rw_i = (self._rw_i + 1) % len(self._rw_wps)
+            wx, wy, wz = self._rw_wps[self._rw_i]
+            dx, dy, dz = wx - self.pos_x, wy - self.pos_y, wz - self.pos_z
+        d = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if d < 1e-3:
+            return 0., 0., 0., 0.
+        s = self._rw_speeds[self._rw_i]
+        vz = max(-1.5, min(1.5, s * dz / d))
+        return s * dx / d, s * dy / d, vz, 0.
 
     # ── Trajectories 1-8 ─────────────────────────────────────────────
     def _ts(self,spd):
@@ -438,11 +528,18 @@ class TargetMover:
         # and left the island inside a 300 s run — T1-T8 have NO boundary
         # repulsion, that layer is T9-only). Vertical bounce unchanged.
         sl=math.radians(sl_deg); lat=spd*math.cos(sl); vb=spd*math.sin(sl)
+        if self._incline_oneway:            # Option A: forward + climb, then level
+            az=self._traj_azimuth           # climb to the ceiling, then cruise fwd
+            vz=vb if self.pos_z<self.Z_CEIL-1 else 0.0
+            return lat*math.cos(az), lat*math.sin(az), vz, 0.
         if self._incline_vz_dir>0 and self.pos_z>=self.Z_CEIL-1:
             self._incline_vz_dir=-1.
         elif self._incline_vz_dir<0 and self.pos_z<=self.Z_FLOOR+1:
             self._incline_vz_dir=1.
         az=self._traj_azimuth
+        if self._incline_no_hreverse:       # Option B: forward + vertical zig-zag
+            return (lat*math.cos(az), lat*math.sin(az),
+                    vb*self._incline_vz_dir, 0.)
         dx=self.pos_x-self._straight_start_x; dy=self.pos_y-self._straight_start_y
         along=dx*math.cos(az)+dy*math.sin(az)
         if abs(along)>self.INCLINE_MAX_DIST and self._straight_dir==1.:

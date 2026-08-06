@@ -10,19 +10,37 @@ source ~/catkin_ws/devel/setup.bash
 RUN=~/catkin_ws/src/drone_tracking/scripts/robust_run.sh
 OUT=/tmp/ms4_batch_results.txt
 touch "$OUT"
+# TRAJ_TRACK_KP (2026-08-06, Rawad): lock the closed-form targets (T1/T4/T5/T8)
+# onto their exact ideal path so they match spec (T1=point, T4/T8=8 m circle,
+# T5=figure-8) instead of open-loop drifting 3-4 m over 200 s. Target-side
+# scenario setting (identical C1/C2) -> does NOT touch the chaser controller or
+# the uniform rule. Only acts on t in (1,4,5,8) internally; T2/3/6/7 ignore it.
 export SPAWN_YAW=90 START_DIST=8 VIEWER=0 SNAP=0 LOSS_TIMEOUT=60 STUCK_TIMEOUT=15
+export TRAJ_TRACK_KP=1.0 TRAJ_TRACK_CAP=2.5
 SEEDS="42 43 45 46 47 48 49 50"
 
 env_for_traj(){ # sets scenario env for trajectory $1
-  unset KI_Z INT_Z_MAX INT_Z_BLEED MAX_VZ CHASER_ZDN \
-        D_HOLD_MIN D_HOLD_MAX D_STAR STRAIGHT_AZ STRAIGHT_MAX 2>/dev/null
+  unset KI_Z INT_Z_MAX INT_Z_BLEED MAX_VZ CHASER_ZDN KP_Z MAX_ACCEL_VZ D_LPF \
+        D_HOLD_MIN D_HOLD_MAX D_STAR STRAIGHT_AZ STRAIGHT_MAX SPAWN_YAW \
+        INCLINE_NO_HREVERSE 2>/dev/null
+  # 2026-08-06 (Rawad, UNIFORM-PARAMETER rule): the low-pass is a fixed 0.5 for
+  # EVERY trajectory (launch_stack default now 0.50; the old 0.70-global +
+  # T3-scoped-to-0.5 hack is GONE — raising d_lpf added lag, so it stays 0.5 and
+  # the decel jerk is handled in the vx law via ~approach_smooth, not the filter).
+  # STANDOFF is a uniform [6,7] m band on ALL trajectories (the old [9,11] on
+  # T5-T8 removed per the rule). NB this is expected to re-open T5 crossovers and
+  # the T7 vertical-swing-vs-frame geometry -> to be re-verified.
+  # Vertical package (KP_Z=6 / MAX_VZ=2.5 / MAX_ACCEL_VZ=6 / KI_Z / INT_Z_*) stays
+  # on the 3D trajectories T6/T7/T8 (needed for vertical tracking; its status
+  # under the uniform rule is still pending Rawad's call).
+  # T6/T7: INCLINE_NO_HREVERSE=1 = Option B (forward + vertical zig-zag, NO
+  # horizontal reverse) per Rawad 2026-08-06.
   case $1 in
-    2|3) export STRAIGHT_AZ=away STRAIGHT_MAX=99999 ;;
-    5)   export D_HOLD_MIN=9.0 D_HOLD_MAX=11.0 D_STAR=10.0 ;;
-    6|7) export KI_Z=2.0 INT_Z_MAX=1.3 INT_Z_BLEED=0.70 MAX_VZ=2.5 CHASER_ZDN=2.5 \
-                D_HOLD_MIN=9.0 D_HOLD_MAX=11.0 D_STAR=10.0 STRAIGHT_AZ=away ;;
-    8)   export KI_Z=2.0 INT_Z_MAX=1.3 INT_Z_BLEED=0.70 MAX_VZ=2.5 CHASER_ZDN=2.5 \
-                D_HOLD_MIN=9.0 D_HOLD_MAX=11.0 D_STAR=10.0 ;;
+    2)   export STRAIGHT_AZ=away STRAIGHT_MAX=99999 SPAWN_YAW=96 ;;
+    3)   export STRAIGHT_AZ=away STRAIGHT_MAX=99999 SPAWN_YAW=96 ;;
+    6|7) export KI_Z=2.0 INT_Z_MAX=1.3 INT_Z_BLEED=0.70 MAX_VZ=2.5 CHASER_ZDN=2.5 KP_Z=6.0 MAX_ACCEL_VZ=6.0 \
+                INCLINE_NO_HREVERSE=1 STRAIGHT_AZ=away ;;
+    8)   export KI_Z=2.0 INT_Z_MAX=1.3 INT_Z_BLEED=0.70 MAX_VZ=2.5 CHASER_ZDN=2.5 KP_Z=6.0 MAX_ACCEL_VZ=6.0 ;;
   esac
 }
 

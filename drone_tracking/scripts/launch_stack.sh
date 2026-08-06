@@ -150,6 +150,26 @@ rosrun drone_tracking random_spawn_target.py _zone:=$ZONE _seed:=$SEED \
     > /tmp/T2_${RUN_TAG}.log 2>&1 &
 sleep 4
 
+# T2b — Spectator camera (M-C: static 3rd-person overlook of the arena).
+# Env-tunable placement so the view can be adjusted without editing. Optical
+# axis = model +X; default aims north (+Y, yaw 1.5708) and ~16 deg down.
+if [ "${SPECTATOR:-0}" = "1" ]; then
+    echo "[T2b] Spawning spectator camera (static overlook)..."
+    rosrun gazebo_ros spawn_model -sdf \
+        -file $PKG_DIR/models/spectator_cam.sdf -model spectator_cam \
+        -x ${SPEC_X:--5.5} -y ${SPEC_Y:-5} -z ${SPEC_Z:-25} \
+        -R 0 -P ${SPEC_PITCH:-0.28} -Y ${SPEC_YAW:-1.5708} \
+        > /tmp/T2b_${RUN_TAG}.log 2>&1
+    sleep 2
+    # SPEC_TRACK=1 → the camera follows the drones (midpoint + offset).
+    if [ "${SPEC_TRACK:-0}" = "1" ]; then
+        echo "[T2c] Spectator tracker (camera follows the drones)..."
+        rosrun drone_tracking spectator_tracker.py \
+            _off_x:=${SPEC_OFF_X:--8} _off_y:=${SPEC_OFF_Y:--8} _off_z:=${SPEC_OFF_Z:-9} \
+            > /tmp/T2c_${RUN_TAG}.log 2>&1 &
+    fi
+fi
+
 # T3 — YOLO
 # SIZE_GATE=off opens the v3.3 plausibility bounds wide (size/aspect filter
 # disabled; persistence gate + conf hysteresis stay). A/B knob — measured
@@ -198,6 +218,17 @@ if [ "${RECORD:-0}" = "1" ]; then
     rosrun drone_tracking demo_recorder.py \
         _out:="$REC_PATH" _scale:=${RECORD_SCALE:-1.0} \
         > /tmp/RC_${RUN_TAG}.log 2>&1 &
+fi
+
+# MV — 3-panel multiview recorder (MULTIVIEW=1; pair with SPECTATOR=1). Composes
+# chaser FOV + spectator cam + live 3-D trajectory into one mp4 (M-C).
+if [ "${MULTIVIEW:-0}" = "1" ]; then
+    MV_DIR="$RESULTS_BASE/multiview"; mkdir -p "$MV_DIR"
+    MV_PATH="$MV_DIR/multiview_${CFG_DIR}_${RUN_TAG}.mp4"
+    echo "[MV] Multiview recorder -> $MV_PATH"
+    rosrun drone_tracking multiview_recorder.py \
+        _out:="$MV_PATH" _fps:=${MULTIVIEW_FPS:-40} \
+        > /tmp/MV_${RUN_TAG}.log 2>&1 &
 fi
 
 # T4 — Kalman (configs 2, 3 only)
@@ -276,19 +307,23 @@ rosrun drone_tracking ibvs_controller_node.py \
     _Kp_wz:=${KP_WZ:-2.0} _Kp_y:=${KP_Y:-0.4} \
     _Kp_z:=${KP_Z:-3.0} _max_vz:=${MAX_VZ:-1.5} \
     _Ki_z:=${KI_Z:-0.04} _int_z_max:=${INT_Z_MAX:-0.2} _int_z_bleed:=${INT_Z_BLEED:-1.0} \
+    _vz_ff_gain:=${VZ_FF_GAIN:-0.0} _vz_ff_cap:=${VZ_FF_CAP:-1.5} \
     _lambda_x:=${LAMBDA_X:-1.0} _lambda_y:=${LAMBDA_Y:-1.0} \
     _lambda_z:=${LAMBDA_Z:-1.0} _lambda_wz:=${LAMBDA_WZ:-1.0} \
+    _lambda_sched:=${LAMBDA_SCHED:-0} _lambda_min:=${LAMBDA_MIN:-0.6} \
+    _lambda_e_ref:=${LAMBDA_E_REF:-3.0} _lambda_v_ref:=${LAMBDA_V_REF:-2.0} _lambda_slew:=${LAMBDA_SLEW:-0.03} \
     _alpha_star:=${ALPHA_STAR:-0.0067} _dead_zone:=${DEAD_ZONE:-0.002} \
     _ea_hold:=${EA_HOLD:-0.010} \
     _vx_mode:=${VX_MODE:-pid} _d_star:=${D_STAR:-8.0} \
     _Kp_vx:=${KP_VX:-2.5} _Ki_vx:=${KI_VX:-1.2} _Kd_vx:=${KD_VX:-1.5} _vx_ff:=${VX_FF:-0.0} _vff_lpf:=${VFF_LPF:-0.9} \
     _int_d_max:=${INT_D_MAX:-6.0} _int_band:=${INT_BAND:-2.5} _int_bleed:=${INT_BLEED:-1.0} _int_hold_only:=${INT_HOLD_ONLY:-1} _band_kp:=${BAND_KP:-0.4} \
     _hold_d_tol:=${HOLD_D_TOL:-1.0} _alpha_dist_k:=${ALPHA_DIST_K:-0.096} \
-    _d_emerg:=${D_EMERG:-0.0} _d_lpf:=${D_LPF:-0.5} _a_dec:=${A_DEC:-2.0} \
+    _d_emerg:=${D_EMERG:-0.0} _d_lpf:=${D_LPF:-0.50} _a_dec:=${A_DEC:-2.0} \
     _d_hold_min:=${D_HOLD_MIN:-6.0} _d_hold_max:=${D_HOLD_MAX:-7.0} \
     _min_dist:=${MIN_DIST:-2.5} _emerg_vy:=${EMERG_VY:-2.0} \
     _emerg_brake_vx:=${EMERG_BRAKE_VX:-4.0} \
     _max_accel:=${MAX_ACCEL:-3.0} _max_accel_fast:=${MAX_ACCEL_FAST:-8.0} \
+    _max_accel_vz:=${MAX_ACCEL_VZ:-3.0} \
     _alt_floor:=${ALT_FLOOR:-11.0} \
     _max_vx_retreat_pid:=${MAX_VX_RETREAT_PID:-2.5} _max_vx:=${MAX_VX:-8.0} \
     _pitch_comp:=${PITCH_COMP:-1.3} _deriv_lpf:=${DERIV_LPF:-0.6} \
@@ -327,6 +362,9 @@ echo "[T11] Target mover (trajectory=$TRAJ seed=$SEED)..."
 rosrun drone_tracking target_mover.py _trajectory:=$TRAJ _seed:=$SEED \
     _straight_az:=${STRAIGHT_AZ:-random} _straight_max:=${STRAIGHT_MAX:-60} \
     _straight_offset:=${STRAIGHT_OFFSET:-0.0} \
+    _traj_track_kp:=${TRAJ_TRACK_KP:-0.0} _traj_track_cap:=${TRAJ_TRACK_CAP:-2.5} \
+    _incline_oneway:=${INCLINE_ONEWAY:-0} _traj_track_lead:=${TRAJ_TRACK_LEAD:-0.0} \
+    _incline_no_hreverse:=${INCLINE_NO_HREVERSE:-0} \
     > /tmp/T11_${RUN_TAG}.log 2>&1 &
 sleep 1
 

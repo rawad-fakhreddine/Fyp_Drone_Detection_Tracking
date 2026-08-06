@@ -304,6 +304,10 @@ class IBVSController:
         # faster vx acceleration when catching up from far (target beyond band);
         # keeps the smooth limit near/inside the band.
         self.max_accel_fast=float(rospy.get_param("~max_accel_fast",8.0))
+        # vz-specific accel limit (2026-08-02): the vertical channel needs to
+        # REVERSE fast to track a bouncing target (az↑ ⟺ HOLD↑ on the zig-zag).
+        # Default = max_accel (byte-for-byte) unless raised. Higher = faster vz.
+        self.max_accel_vz=float(rospy.get_param("~max_accel_vz",self.max_accel))
         self._pub_vx=self._pub_vy=self._pub_vz=0.0
 
         # Y / Z / yaw PID
@@ -330,6 +334,15 @@ class IBVSController:
         self.Kp_z=float(rospy.get_param("~Kp_z",3.0))
         self.Ki_z=float(rospy.get_param("~Ki_z",0.04)); self.Kd_z=0.5
         self.int_z_bleed=float(rospy.get_param("~int_z_bleed",1.0))
+        # 2026-08-04 vertical-velocity FEEDFORWARD (Task #8): on a bouncing/
+        # climbing target the integrator recharges slowly at each vertical
+        # reversal -> the target rides ~0.20 of frame off-centre (|ey_c|~0.20 on
+        # T7). Anticipate the target's TRUE vertical speed = d_hat * angular
+        # drift rate: vz_ff = Kff_z * d_hat * dey (same sign/place as Kd_z*dey,
+        # but distance-scaled so far-target angular drift maps to real m/s).
+        # Default 0.0 = byte-for-byte OFF; ~vz_ff_gain rosparam / VZ_FF_GAIN knob.
+        self.vz_ff_gain=float(rospy.get_param("~vz_ff_gain",0.0))
+        self.vz_ff_cap=float(rospy.get_param("~vz_ff_cap",1.5))  # |feedforward| clamp (m/s)
         self.Kp_wz=float(rospy.get_param("~Kp_wz",0.9)); self.Ki_wz=0.; self.Kd_wz=0.15
 
         # Velocity limits
@@ -793,7 +806,14 @@ class IBVSController:
             vx=np.clip(vx,-self.max_vx_retreat,self.max_vx)
 
         vy=-gain*(self.Kp_y*ex+self.Ki_y*self.int_err_y+self.Kd_y*dex)
-        vz=-gain*(self.Kp_z*ey+self.Ki_z*self.int_err_z+self.Kd_z*dey)
+        # vertical-velocity feedforward (Task #8): distance-scaled anticipation of
+        # the target's vertical motion so vz doesn't wait for the integrator to
+        # recharge at a bounce reversal. dey is already deriv_lpf-smoothed; guard
+        # nan d_hat and clamp so it can't blow up at range.
+        vz_ff=0.0
+        if self.vz_ff_gain>0.0 and not math.isnan(self.d_hat):
+            vz_ff=float(np.clip(self.vz_ff_gain*self.d_hat*dey,-self.vz_ff_cap,self.vz_ff_cap))
+        vz=-gain*(self.Kp_z*ey+self.Ki_z*self.int_err_z+self.Kd_z*dey+vz_ff)
         wz=-gain*(self.Kp_wz*ex+self.Kd_wz*dex)
         vy=vy*self.lambda_y; vz=vz*self.lambda_z; wz=wz*self.lambda_wz  # M12 λ (before clamp)
         vy=np.clip(vy,-self.max_vy,self.max_vy)
@@ -893,8 +913,18 @@ class IBVSController:
                 elif da>self.stale_timeout: pass
                 elif self.got_real_detection:
                     cvx,cvy,cvz,cwz=self.compute_velocities(gain_scale=self.approach_ramp_factor())
-                    ex_=abs((self.cx-self.img_cx)/self.img_cx-self.x_star)
-                    ey_=abs((self.cy-self.img_cy)/self.img_cy-self.y_star)
+                    # 2026-08-03 HOLD-label fix: gate on the pitch-compensated
+                    # tracking errors the controller actually drives (ex_c/ey_c),
+                    # NOT raw pixel offsets. On the fast T3 chase the steady
+                    # nose-down cruise pitch biases raw ey to ~0.24 (> the 0.12
+                    # gate) while ey_c stays ~0.03 in-band. HOLD latches on entry,
+                    # so on seeds where raw-ey never dips under 0.12 the run reads
+                    # 0 % HOLD despite holding perfectly (the "T3 0%-HOLD"
+                    # artifact: 2/8 seeds, band-occ 93-94 % identical to the rest).
+                    # ex_c == raw ex (no horizontal pitch coupling), so C1/C2 and
+                    # all non-pitched trajectories are byte-unaffected.
+                    ex_=abs(self.ex_c)
+                    ey_=abs(self.ey_c)
                     # v6.31: HOLD distance criterion — meters in pid mode,
                     # ea band (rosparam ~ea_hold, default .010) in legacy mode
                     if self.vx_mode=="pid":
@@ -967,7 +997,8 @@ class IBVSController:
                 dvx=(self.max_accel_fast if far else self.max_accel)*self.dt
                 cvx=float(np.clip(cvx,self._pub_vx-dvx,self._pub_vx+dvx))
                 cvy=float(np.clip(cvy,self._pub_vy-dv,self._pub_vy+dv))
-                cvz=float(np.clip(cvz,self._pub_vz-dv,self._pub_vz+dv))
+                dvz=self.max_accel_vz*self.dt   # vz can reverse faster (bounce tracking)
+                cvz=float(np.clip(cvz,self._pub_vz-dvz,self._pub_vz+dvz))
 
             # ── v6.26: P1 EMERGENCY BRAKE GUARD — override ABOVE the control law.
             # The normal brake branch saturates at max_vx_retreat=0.50 m/s; a
