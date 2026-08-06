@@ -212,7 +212,15 @@ class IBVSController:
         # (matched-speed arrival). v_target_est = gap-rate + own vx, so a
         # target turning toward the chaser collapses the cap immediately.
         self.a_dec=float(rospy.get_param("~a_dec",0.0))
-        self.alpha_dist_k=float(rospy.get_param("~alpha_dist_k",0.096))
+        # 2026-08-06 CALIBRATION 0.096 -> 0.077: measured alpha*d_true^2 vs Gazebo
+        # GT (48k detected frames) = ~0.077 in the 5-8 m band; 0.096 made d_hat
+        # over-read ~13% (+0.5 m) so the chaser held at true ~5.5 m believing 6 m.
+        # 0.077 -> d_hat honest -> holds at true 6-7 m + decel cap engages at the
+        # right distance (shallower, safer arrival). Validated T1-T8: custody 100%,
+        # HOLD 95-98%, closest safer on 7/8; safety ceiling reads honest d_hat (more
+        # conservative). This is THE smooth-deceleration fix (near-band gadgets
+        # approach_smooth/decel_damp were dead ends: d_hat bias was the root cause).
+        self.alpha_dist_k=float(rospy.get_param("~alpha_dist_k",0.077))
         # dead_d 0.05 (was 0.2): a P law is gentle near zero error by itself;
         # the wide dead zone caused a stop-go limit cycle (vx=0 inside, kick
         # outside) — the run-4 chaser surge the user saw.

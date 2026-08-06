@@ -317,7 +317,7 @@ rosrun drone_tracking ibvs_controller_node.py \
     _vx_mode:=${VX_MODE:-pid} _d_star:=${D_STAR:-8.0} \
     _Kp_vx:=${KP_VX:-2.5} _Ki_vx:=${KI_VX:-1.2} _Kd_vx:=${KD_VX:-1.5} _vx_ff:=${VX_FF:-0.0} _vff_lpf:=${VFF_LPF:-0.9} \
     _int_d_max:=${INT_D_MAX:-6.0} _int_band:=${INT_BAND:-2.5} _int_bleed:=${INT_BLEED:-1.0} _int_hold_only:=${INT_HOLD_ONLY:-1} _band_kp:=${BAND_KP:-0.4} \
-    _hold_d_tol:=${HOLD_D_TOL:-1.0} _alpha_dist_k:=${ALPHA_DIST_K:-0.096} \
+    _hold_d_tol:=${HOLD_D_TOL:-1.0} _alpha_dist_k:=${ALPHA_DIST_K:-0.077} \
     _d_emerg:=${D_EMERG:-0.0} _d_lpf:=${D_LPF:-0.50} _a_dec:=${A_DEC:-2.0} \
     _d_hold_min:=${D_HOLD_MIN:-6.0} _d_hold_max:=${D_HOLD_MAX:-7.0} \
     _min_dist:=${MIN_DIST:-2.5} _emerg_vy:=${EMERG_VY:-2.0} \
