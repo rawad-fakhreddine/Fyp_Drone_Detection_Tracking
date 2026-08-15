@@ -80,6 +80,12 @@ VEL_YR_MASK = (
     PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY | PositionTarget.IGNORE_PZ |
     PositionTarget.IGNORE_AFX | PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
     PositionTarget.IGNORE_YAW)
+# velocity XY + POSITION Z (+ yaw_rate): PX4 holds the exact altitude so the
+# target can't drift on the flat trajectories (2026-08-10, ~z_hold).
+POSZ_VELXY_MASK = (
+    PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY | PositionTarget.IGNORE_VZ |
+    PositionTarget.IGNORE_AFX | PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
+    PositionTarget.IGNORE_YAW)
 
 # ═══════════════════════════════════════════════════════════════════════
 #  FUZZY ESCAPER  —  v10.6  (speed universe [1.0, 3.5])
@@ -228,6 +234,22 @@ class TargetMover:
         # 0.0 = OFF = byte-for-byte legacy open-loop (unchanged matrix behaviour).
         self._traj_track_kp=float(rospy.get_param('~traj_track_kp',0.0))
         self._traj_track_cap=float(rospy.get_param('~traj_track_cap',2.5))
+        # T5 lemniscate half-width (m), env-tunable (default = class LEMN_A=8).
+        # Larger -> wider figure-8 so the chaser covers a bigger region.
+        self.LEMN_A=float(rospy.get_param('~lemn_a',self.LEMN_A))
+        # separate ALTITUDE-hold gain for the path-lock (2026-08-10): a P pull has
+        # steady-state error against the target's slow vz drift; a stronger Z gain
+        # removes the ~0.4 m climb on the flat trajectories (T1/T2/T3/T4/T5).
+        # Default = traj_track_kp (no change unless set higher).
+        self._traj_track_kp_z=float(rospy.get_param('~traj_track_kp_z',self._traj_track_kp))
+        # integral on the altitude error -> zeros the steady-state climb (a P pull
+        # alone leaves offset against the constant drift). Clamped. Default 0 = off.
+        self._traj_track_ki_z=float(rospy.get_param('~traj_track_ki_z',0.0))
+        self._track_int_z=0.0
+        # ~z_hold (2026-08-10): on the FLAT trajectories (T1-T5) command the Z as a
+        # POSITION setpoint (PX4 altitude hold) instead of velocity -> the target
+        # cannot drift/climb. Default 0 = velocity Z (byte-compat).
+        self._z_hold=int(rospy.get_param('~z_hold',0))
         # M-B: T6/T7 as a SINGLE straight inclined leg (no vertical bounce, no
         # horizontal shuttle). 0 = legacy bounce/shuttle. NB one-way climbs out
         # of bounds fast (T7 ~1.72 m/s up), so pair with a SHORT DURATION.
@@ -345,12 +367,14 @@ class TargetMover:
                           "/gazebo/model_states — fuzzy distance invalid. "
                           "Check model names.")
 
-    def send_vel(self,vx=0.,vy=0.,vz=0.,yr=0.):
+    def send_vel(self,vx=0.,vy=0.,vz=0.,yr=0.,pz=None):
         m=PositionTarget(); m.header.stamp=rospy.Time.now()
         m.coordinate_frame=PositionTarget.FRAME_LOCAL_NED
-        m.type_mask=VEL_YR_MASK
-        m.velocity.x=float(vx); m.velocity.y=float(vy)
-        m.velocity.z=float(vz); m.yaw_rate=float(yr)
+        m.velocity.x=float(vx); m.velocity.y=float(vy); m.yaw_rate=float(yr)
+        if pz is None:
+            m.type_mask=VEL_YR_MASK; m.velocity.z=float(vz)
+        else:                              # velocity XY + hold this exact altitude
+            m.type_mask=POSZ_VELXY_MASK; m.position.z=float(pz)
         self.cmd_pub.publish(m)
 
     # ── Trajectory init/dispatch ──────────────────────────────────────
@@ -436,13 +460,18 @@ class TargetMover:
         # trajectories whose ideal position is closed-form (T1 hold, T4 circle,
         # T5 figure-8, T8 helix-xy). T2/T3/T6/T7 already track spec (they are
         # position-referenced), so they are left byte-for-byte unchanged.
-        if self._traj_track_kp>0.0 and t in (1,4,5,8):
+        # (2026-08-10) T2/T3 straight lines added to the closed-form path-lock so
+        # they fly a clean level line (kills the open-loop climb + lateral wobble).
+        if self._traj_track_kp>0.0 and t in (1,2,3,4,5,8):
             ix,iy,iz=self._ideal_pos(elapsed)
-            kp,cap=self._traj_track_kp,self._traj_track_cap
+            kp,kpz,cap=self._traj_track_kp,self._traj_track_kp_z,self._traj_track_cap
             vx+=max(-cap,min(cap,kp*(ix-self.pos_x)))
             vy+=max(-cap,min(cap,kp*(iy-self.pos_y)))
-            if t in (1,4,5):               # flat trajectories: hold start altitude
-                vz+=max(-cap,min(cap,kp*(iz-self.pos_z)))   # T8 z bounces -> no z-hold
+            if t in (1,2,3,4,5):           # flat trajectories: hold start altitude
+                ez=iz-self.pos_z
+                if self._traj_track_ki_z>0.0:
+                    self._track_int_z=max(-2.5,min(2.5,self._track_int_z+ez*dt))
+                vz+=max(-cap,min(cap,kpz*ez+self._traj_track_ki_z*self._track_int_z))
         return vx,vy,vz,wz
 
     def _ideal_pos(self,e):
@@ -462,6 +491,10 @@ class TargetMover:
             w=2*math.pi/self.LEMN_T
             return (sx+self.LEMN_A*math.sin(w*e),
                     sy+0.5*self.LEMN_A*math.sin(2*w*e), sz)
+        if t in (2,3):                     # straight line: start + speed*t along az
+            spd=self.TRAJ2_SPEED if t==2 else self.TRAJ3_SPEED
+            az=self._traj_azimuth
+            return (sx+spd*e*math.cos(az), sy+spd*e*math.sin(az), sz)
         return sx,sy,sz                    # T1 hold at anchor
 
     def _tr(self):
@@ -815,7 +848,11 @@ class TargetMover:
             elif self.phase == "MOVING":
                 elapsed = (now - self.motion_start_time).to_sec()
                 vx, vy, vz, yr = self._get_traj_vel(elapsed, dt)
-                self.send_vel(vx, vy, vz, yr)
+                # z_hold: on the flat trajectories command the moving-start altitude
+                # as a POSITION setpoint so PX4 holds it (no drift). vz is ignored.
+                pz = (self._straight_start_z
+                      if (self._z_hold and self.trajectory in (1,2,3,4,5)) else None)
+                self.send_vel(vx, vy, vz, yr, pz=pz)
                 rospy.loginfo_throttle(5,
                     "[TargetMover] T%d t=%.0fs pos=(%.1f,%.1f,%.1f) v=(%.1f,%.1f,%+.1f)"
                     % (self.trajectory, elapsed,

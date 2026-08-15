@@ -363,8 +363,11 @@ rosrun drone_tracking target_mover.py _trajectory:=$TRAJ _seed:=$SEED \
     _straight_az:=${STRAIGHT_AZ:-random} _straight_max:=${STRAIGHT_MAX:-60} \
     _straight_offset:=${STRAIGHT_OFFSET:-0.0} \
     _traj_track_kp:=${TRAJ_TRACK_KP:-0.0} _traj_track_cap:=${TRAJ_TRACK_CAP:-2.5} \
+    _traj_track_kp_z:=${TRAJ_TRACK_KP_Z:-${TRAJ_TRACK_KP:-0.0}} \
+    _traj_track_ki_z:=${TRAJ_TRACK_KI_Z:-0.0} _z_hold:=${Z_HOLD:-0} \
     _incline_oneway:=${INCLINE_ONEWAY:-0} _traj_track_lead:=${TRAJ_TRACK_LEAD:-0.0} \
     _incline_no_hreverse:=${INCLINE_NO_HREVERSE:-0} \
+    _lemn_a:=${LEMN_A:-8.0} \
     > /tmp/T11_${RUN_TAG}.log 2>&1 &
 sleep 1
 
