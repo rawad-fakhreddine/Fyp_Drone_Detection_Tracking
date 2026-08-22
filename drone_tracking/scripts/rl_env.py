@@ -37,6 +37,7 @@ import rospy
 from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from std_msgs.msg import String
 from mavros_msgs.msg import PositionTarget
+from mavros_msgs.srv import SetMode
 from gazebo_msgs.msg import ModelStates
 
 try:
@@ -362,6 +363,27 @@ if _GYM:
             raw['reward'] = reward; raw['term_reason'] = reason
             return obs, reward, terminated, truncated, raw
 
+        def _request_offboard(self):
+            """Request OFFBOARD mode via MAVROS. Needed when SKIP_IBVS=1: without a
+            prior setpoint stream, PX4 drops OFFBOARD within 0.5s of last setpoint,
+            so by the time reset() is called the drone is in HOLD. Stream setpoints
+            first for 1s, THEN request mode change (PX4 rejects the switch if no
+            recent setpoints exist)."""
+            try:
+                # pre-stream setpoints so PX4 accepts the mode request
+                r = rospy.Rate(20)
+                for _ in range(20):   # 1s @ 20 Hz
+                    self._set_cmd(0, 0, 0, 0)
+                    r.sleep()
+                set_mode = rospy.ServiceProxy('/mavros/set_mode', SetMode)
+                resp = set_mode(custom_mode='OFFBOARD')
+                if resp.mode_sent:
+                    rospy.loginfo("[rl_env] OFFBOARD mode requested OK")
+                else:
+                    rospy.logwarn("[rl_env] OFFBOARD request returned mode_sent=False")
+            except Exception as e:
+                rospy.logwarn("[rl_env] OFFBOARD request failed: %s", e)
+
         def reset(self, seed=None, options=None):
             # RESET-FREE: no teleport. But EVERY episode must start from a VALID, SAFE
             # tracking state. Unlike the BC teacher, a learning policy ends episodes on a
@@ -376,6 +398,11 @@ if _GYM:
             self._ka_active = True            # training starts now -> take over the stream
             if self._first_reset:
                 self._first_reset = False
+                # Re-request OFFBOARD when SKIP_IBVS=1: OFFBOARD drops within 0.5s of last
+                # setpoint; with no IBVS, the mode was lost by the time reset() is called.
+                # The service call streams setpoints first (PX4 requires a live stream to
+                # accept the OFFBOARD request), then switches the mode.
+                self._request_offboard()
                 # hold a pure hover while IBVS is killed — the policy must NOT step yet
                 rospy.loginfo("[rl_env] HANDOFF: hovering %.1fs — kill IBVS now.", self._handoff_wait)
                 t0 = rospy.Time.now()
@@ -383,13 +410,19 @@ if _GYM:
                     self._set_cmd(0, 0, 0, 0)
                     rospy.sleep(0.05)
             self._recover()
+            # If _recover() timed out with no detection, t_last_det=None → t_since_raw=999
+            # → step() immediately fires the "lost" terminal before the policy takes a step.
+            # Reset the timer to now so the first episode gets at least loss_secs to acquire.
+            if self.ob.t_last_det is None:
+                self.ob.t_last_det = rospy.Time.now()
+                rospy.logwarn("[rl_env] No detection after _recover — resetting t_last_det to now")
             self.ob.a_prev = np.zeros(4, dtype=np.float32)   # fresh smoothness baseline
             self._ep_t0 = rospy.Time.now()
             self._ep_steps = 0
             obs, raw = self.ob.build()
             return obs, raw
 
-        def _recover(self, timeout=25.0):
+        def _recover(self, timeout=90.0):
             """Establish a STABLE, IN-BAND, CENTERED start before each episode (see reset()).
             GT-DRIVEN (training-only scaffolding, never in the obs): drives the chaser to
             band-centre range, matched altitude, and facing the target, then requires ~0.5 s
