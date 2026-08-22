@@ -467,11 +467,17 @@ if _GYM:
                         vxw, vyw = mag * dx_w / rng, mag * dy_w / rng
                     else:
                         vxw = vyw = 0.0
-                    cy, sy = math.cos(yaw), math.sin(yaw)                    # world -> body
-                    vx_b =  cy * vxw + sy * vyw
-                    vy_b = -sy * vxw + cy * vyw
-                    vz = max(-1.5, min(1.5, 0.8 * dz))                       # match altitude
-                    wz = max(-0.6, min(0.6, 1.2 * dbeta))                    # face -> centers it
+                    cy, sy = math.cos(yaw), math.sin(yaw)
+                    # ENU world → FRAME_BODY_NED (FRD: Forward=+x, Right=+y, Down=+z).
+                    # vx_b = projection onto forward (ENU yaw=0=East → forward=East)
+                    # vy_b = projection onto RIGHT (not left) → sign is +sy*vxw - cy*vyw
+                    #        NOT (-sy*vxw + cy*vyw) which is the FLU/left convention.
+                    # vz: target above (dz>0) → move UP → NED z = down → vz_NED = -0.8*dz
+                    # wz: dbeta>0 → target is CCW from heading → LEFT turn → NED = -dbeta
+                    vx_b =  cy * vxw + sy * vyw                              # forward (correct)
+                    vy_b =  sy * vxw - cy * vyw                              # right  (FRD sign fix)
+                    vz   = max(-1.5, min(1.5, -0.8 * dz))                   # up=NED-neg (sign fix)
+                    wz   = max(-0.6, min(0.6, -1.2 * dbeta))                # CCW=NED-neg (sign fix)
                     self._set_cmd(vx_b, vy_b, vz, wz)
                 else:
                     self._set_cmd(0, 0, 0, 0.4 if el > 1.0 else 0.0)        # no GT -> yaw scan
