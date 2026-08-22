@@ -379,26 +379,30 @@ if [ "${NO_LOCKSTEP:-0}" = "1" ] && [ -n "${SPEED_FACTOR:-}" ] && [ "${SPEED_FAC
         echo "  chaser EKF2_GPS_P_NOISE=$EKF_P" || echo "  WARN: chaser EKF2_GPS_P_NOISE set failed"
     timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_GPS_P_NOISE "$EKF_P" >/dev/null 2>&1 && \
         echo "  target EKF2_GPS_P_NOISE=$EKF_P" || echo "  WARN: target EKF2_GPS_P_NOISE set failed"
-    # Enable vision fusion (eeprom bakes AID_MASK=9; mavparam is belt-and-suspenders).
-    # EKF2_AID_MASK=9 = GPS(1<<0) + EV_position(1<<3=8). EVP_NOISE=0.05m baked in eeprom.
-    # HGT_MODE=3 (vision) also baked in eeprom; vision z dominates barometer.
-    # DOCX: post-alignment mavparam may not reshape active matrices; eeprom is primary.
-    timeout 15 rosrun mavros mavparam set EKF2_AID_MASK 9 >/dev/null 2>&1 && \
-        echo "  chaser EKF2_AID_MASK=9 (GPS+EVpos)" || echo "  WARN: chaser EKF2_AID_MASK set failed"
-    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_AID_MASK 9 >/dev/null 2>&1 && \
-        echo "  target EKF2_AID_MASK=9 (GPS+EVpos)" || echo "  WARN: target EKF2_AID_MASK set failed"
+    # AID_MASK=264=EV_pos(8)+EV_vel(256). Eeprom bakes this; mavparam belt-and-suspenders.
+    # v8(AID=9): GPS vel wrong → "horiz vel not stable". v10(AID=265): GPS+EVvel conflict
+    # → "Position estimate error". Fix: AID=264 = EV pos+vel ONLY. No GPS conflict.
+    # EV pos=GT exact position; EV vel=finite-diff GT. Both stable at any speed factor.
+    timeout 15 rosrun mavros mavparam set EKF2_AID_MASK 264 >/dev/null 2>&1 && \
+        echo "  chaser EKF2_AID_MASK=264 (EVpos+EVvel)" || echo "  WARN: chaser EKF2_AID_MASK set failed"
+    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_AID_MASK 264 >/dev/null 2>&1 && \
+        echo "  target EKF2_AID_MASK=264 (EVpos+EVvel)" || echo "  WARN: target EKF2_AID_MASK set failed"
     timeout 15 rosrun mavros mavparam set EKF2_HGT_MODE 3 >/dev/null 2>&1 && \
         echo "  chaser EKF2_HGT_MODE=3 (vision)" || echo "  WARN: chaser EKF2_HGT_MODE set failed"
     timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_HGT_MODE 3 >/dev/null 2>&1 && \
         echo "  target EKF2_HGT_MODE=3 (vision)" || echo "  WARN: target EKF2_HGT_MODE set failed"
+    timeout 15 rosrun mavros mavparam set EKF2_EVV_NOISE 0.1 >/dev/null 2>&1 && \
+        echo "  chaser EKF2_EVV_NOISE=0.1" || echo "  WARN: chaser EKF2_EVV_NOISE set failed"
+    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_EVV_NOISE 0.1 >/dev/null 2>&1 && \
+        echo "  target EKF2_EVV_NOISE=0.1" || echo "  WARN: target EKF2_EVV_NOISE set failed"
 fi
 # T6b — Vision GT bridge (nolockstep only).
 # Bridges /gazebo/model_states → /mavros/vision_pose/pose for both drones.
 # Publishes RELATIVE positions (spawn-zeroed) so EKF local-frame innovations are <1m.
 # (Absolute Gazebo world coords → 30+ m innovations → silently rejected, cs_ev_pos=0.)
-# AID_MASK=9: GPS(1) + EV_pos(8=1<<3). HGT_MODE=3: vision primary height.
-# EVP_NOISE=0.05m dominates GPS_P_NOISE=2.0m (40×) → EKF z stable → FlightTaskOffboard
-# gets non-oscillating EKF → velocity setpoints instead of thrust=0.001 fallback.
+# AID_MASK=264=EVpos+EVvel only (no GPS). EV velocity (exact GT) vs GPS vel (half at 2×/4×)
+# → GPS-EV conflict on AID=265 → "Position estimate error". AID=264 avoids the conflict.
+# HGT_MODE=3: vision height. EVP_NOISE=0.05m, EVV_NOISE=0.1 m/s (tight GT).
 if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
     echo "[T6b] Vision GT bridge (Gazebo GT → EKF2 vision fusion)..."
     rosrun drone_tracking gz_gt_to_vision.py > /tmp/T6b_${RUN_TAG}.log 2>&1 &
