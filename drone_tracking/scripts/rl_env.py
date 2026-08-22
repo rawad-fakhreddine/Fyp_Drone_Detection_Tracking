@@ -444,30 +444,40 @@ if _GYM:
                     rospy.logwarn("[rl_env] _recover timed out (%.0fs); starting anyway", timeout)
                     self._set_cmd(0, 0, 0, 0); return
                 td = self.ob.true_dist
-                # --- success gate: a REAL detection, in band, roughly centered ---
-                framed = self.ob.valid and (math.isnan(td) or
-                         (lo - 0.4 <= td <= hi + 0.4 and abs(self.ob.f_ey) < 0.35
-                          and abs(self.ob.f_ex) < 0.35))
-                if framed:
-                    self._set_cmd(0, 0, 0, 0); settle += 1
-                    if settle >= 10:                      # ~0.5 s stable framed -> go
-                        return
-                    r.sleep(); continue
-                settle = 0
-                # --- GT reposition toward {band-centre range, matched altitude, facing} ---
+                # --- success gate: GT-primary (YOLO not required for recovery positioning).
+                # _recover() uses GT for navigation, so GT is authoritative for readiness.
+                # YOLO is unreliable at 4× speed (sparse rendering). Requiring it here caused
+                # the 90s timeout every episode. "Framed" = within band AND facing ±17°.
                 rel = self.ob.rel_w
                 if not any(math.isnan(v) for v in rel):
                     dx_w, dy_w, dz = rel
                     rng = math.hypot(dx_w, dy_w)
                     yaw = self.ob.chaser_yaw
                     dbeta = math.atan2(dy_w, dx_w) - yaw
-                    dbeta = math.atan2(math.sin(dbeta), math.cos(dbeta))     # wrap to [-pi,pi]
+                    dbeta = math.atan2(math.sin(dbeta), math.cos(dbeta))
+                    framed_gt = (lo - 0.5 <= (td if not math.isnan(td) else rng) <= hi + 0.5
+                                 and abs(dbeta) < 0.3)
+                else:
+                    dbeta = 0.0; rng = float('nan'); framed_gt = False
+                framed = framed_gt or (self.ob.valid and not math.isnan(td)
+                                       and lo - 0.4 <= td <= hi + 0.4)
+                if framed:
+                    self._set_cmd(0, 0, 0, 0); settle += 1
+                    if settle >= 10:                      # ~0.5 s stable → go
+                        return
+                    r.sleep(); continue
+                settle = 0
+                # --- GT reposition toward {band-centre range, matched altitude, facing} ---
+                # rel/dx_w/dy_w/dz/rng/yaw/dbeta already computed in framed gate above.
+                if not any(math.isnan(v) for v in rel):
+                    dx_w, dy_w, dz = rel
+                    yaw = self.ob.chaser_yaw
+                    cy, sy = math.cos(yaw), math.sin(yaw)
                     if rng > 1e-3:
                         mag = max(-1.5, min(1.5, 0.6 * (rng - d_star)))      # +approach / -back off
                         vxw, vyw = mag * dx_w / rng, mag * dy_w / rng
                     else:
                         vxw = vyw = 0.0
-                    cy, sy = math.cos(yaw), math.sin(yaw)
                     # ENU world → FRAME_BODY_NED (FRD: Forward=+x, Right=+y, Down=+z).
                     # vx_b = projection onto forward (ENU yaw=0=East → forward=East)
                     # vy_b = projection onto RIGHT (not left) → sign is +sy*vxw - cy*vyw
