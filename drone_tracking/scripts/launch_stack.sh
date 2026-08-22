@@ -50,7 +50,16 @@ mkdir -p "$RESULTS_DIR"
 
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel/setup.bash
-source $PX4_HOME/Tools/setup_gazebo.bash $PX4_HOME $PX4_HOME/build/px4_sitl_default 2>/dev/null
+# NO_LOCKSTEP=1: use px4_sitl_nolockstep binary + nolockstep SDF models + PX4_SIM_SPEED_FACTOR.
+# C1/C2 runs NEVER set NO_LOCKSTEP (default=0 → px4_sitl_default, unchanged behaviour).
+PX4_BUILD_TYPE="px4_sitl_default"
+if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
+    PX4_BUILD_TYPE="px4_sitl_nolockstep"
+    SPEED_FACTOR="${SPEED_FACTOR:-4}"
+    export PX4_SIM_SPEED_FACTOR="$SPEED_FACTOR"
+    echo "[T1] NO_LOCKSTEP mode: build=$PX4_BUILD_TYPE  speed=${SPEED_FACTOR}x"
+fi
+source $PX4_HOME/Tools/setup_gazebo.bash $PX4_HOME $PX4_HOME/build/$PX4_BUILD_TYPE 2>/dev/null
 export ROS_PACKAGE_PATH=$ROS_PACKAGE_PATH:$PX4_HOME:$PX4_HOME/Tools/sitl_gazebo
 
 echo ""
@@ -128,13 +137,76 @@ fi
 # (Rawad's directive 2026-07-17: revise by fact, not by guessing).
 bash "$PKG_DIR/scripts/code_stamp.sh" "$RESULTS_DIR/$RUN_TAG" 2>/dev/null || true
 
-echo "[T1] Gazebo + Chaser PX4 + MAVROS..."
-roslaunch $PX4_HOME/launch/mavros_posix_sitl.launch \
-    vehicle:=iris \
-    interactive:=false \
-    sdf:=$PX4_HOME/Tools/sitl_gazebo/models/iris_fpv_cam/iris_fpv_cam.sdf \
-    world:=$PX4_HOME/Tools/sitl_gazebo/worlds/baylands.world \
-    > /tmp/T1_${RUN_TAG}.log 2>&1 &
+# SPEED_FACTOR>1 (RL training): PX4 lockstep runs the sim faster than real-time so
+# each 100 s episode finishes in less wall time. Default unset = 1× = unchanged C1/C2 behaviour.
+# NOTE: PX4_SIM_SPEED_FACTOR is for nolockstep ONLY. In lockstep, PX4's hrt tracks
+# sim_time from HIL_SENSOR, so scaling the internal clock causes EKF filter faults.
+# Lockstep speedup comes from real_time_factor=2 in the world file (Gazebo runs 2×).
+if [ -n "${SPEED_FACTOR:-}" ] && [ "${SPEED_FACTOR}" != "1" ]; then
+    if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
+        export PX4_SIM_SPEED_FACTOR="${SPEED_FACTOR}"
+        echo "[T1] SIM SPEED FACTOR = ${SPEED_FACTOR}x (nolockstep wall-clock scaling)"
+    else
+        echo "[T1] SIM SPEED FACTOR = ${SPEED_FACTOR}x (lockstep faster-than-real-time)"
+    fi
+fi
+# HEADLESS=1 (RL training): no gzclient GUI → frees GPU/CPU, faster sim + env loop.
+# The camera SENSOR still renders offscreen in gzserver (YOLO input); only the GUI
+# window is dropped. Default off = gui:=true = unchanged C1/C2 behaviour.
+GUI_ARG=true
+if [ "${HEADLESS:-0}" = "1" ]; then GUI_ARG=false; echo "[T1] HEADLESS (no gzclient GUI — camera sensor still feeds YOLO)"; fi
+# WORLD: override to a lighter world for RL training (e.g. WORLD=rl_empty).
+# baylands.world = default (C1/C2 baseline); rl_empty = flat + sky only (faster physics).
+WORLD_FILE="${WORLD:-baylands}.world"
+WORLD_PATH="$PX4_HOME/Tools/sitl_gazebo/worlds/${WORLD_FILE}"
+if [ ! -f "$WORLD_PATH" ]; then
+    echo "[T1] WARNING: world $WORLD_PATH not found, falling back to baylands.world"
+    WORLD_PATH="$PX4_HOME/Tools/sitl_gazebo/worlds/baylands.world"
+fi
+# Select chaser SDF: nolockstep variant for RL, standard for C1/C2
+CHASER_SDF="$PX4_HOME/Tools/sitl_gazebo/models/iris_fpv_cam/iris_fpv_cam.sdf"
+if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
+    CHASER_SDF="$PX4_HOME/Tools/sitl_gazebo/models/iris_fpv_cam_nolockstep/iris_fpv_cam_nolockstep.sdf"
+fi
+if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
+    # NOLOCKSTEP: split launch to fix TIMESYNC.
+    # Root cause: libgazebo_ros_api_plugin.so forces /use_sim_time=true in its Load()
+    # regardless of launch file args. MAVROS then timestamps setpoints with sim_time≈0,
+    # but PX4 nolockstep uses wall_time (~1.787e9 s) → setpoints appear 56 years stale
+    # → rejected → OFFBOARD drops immediately after ARM.
+    # Fix: launch Gazebo+PX4 first (no MAVROS), wait for plugin Load() to finish,
+    # then override use_sim_time=false, then launch MAVROS with wall-clock time.
+    echo "[T1] Nolockstep: Gazebo + Chaser PX4 only (world=$(basename $WORLD_PATH)  speed=${SPEED_FACTOR}x)..."
+    roslaunch $PX4_HOME/launch/posix_sitl.launch \
+        vehicle:=iris \
+        interactive:=false \
+        gui:=$GUI_ARG \
+        build_type:=$PX4_BUILD_TYPE \
+        sdf:=$CHASER_SDF \
+        world:=$WORLD_PATH \
+        > /tmp/T1_${RUN_TAG}.log 2>&1 &
+    # Wait for Gazebo to publish /clock (plugin Load() ran, use_sim_time forced true)
+    wait_topic "/clock" 60 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1; }
+    sleep 3   # ensure libgazebo_ros_api_plugin Load() has set /use_sim_time=true
+    rosparam set /use_sim_time false
+    echo "[T1b] Nolockstep: Chaser MAVROS (wall-time mode — matches PX4 hrt_absolute_time)..."
+    # Use a dedicated launch file (node.launch directly with our config yaml).
+    # px4.launch doesn't expose config_yaml as overridable; node.launch CLI has empty-string quoting issues.
+    roslaunch $PKG_DIR/launch/chaser_mavros_nolockstep.launch \
+        > /tmp/T1b_${RUN_TAG}.log 2>&1 &
+else
+    # LOCKSTEP (C1/C2 default): combined launch, unchanged behaviour
+    echo "[T1] Gazebo + Chaser PX4 + MAVROS (world=$(basename $WORLD_PATH)  lockstep=1)..."
+    roslaunch $PX4_HOME/launch/mavros_posix_sitl.launch \
+        vehicle:=iris \
+        interactive:=false \
+        gui:=$GUI_ARG \
+        build_type:=$PX4_BUILD_TYPE \
+        sdf:=$CHASER_SDF \
+        world:=$WORLD_PATH \
+        use_sim_time:=true \
+        > /tmp/T1_${RUN_TAG}.log 2>&1 &
+fi
 wait_topic "/mavros/state" 60 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1; }
 # Gate: chaser PX4 alive and linked to MAVROS (= baylands fully loaded and the
 # sim stepping) BEFORE the zone teleport — topic existence alone fires ~30 s
@@ -253,7 +325,7 @@ fi
 # to accept connection on TCP port 4561" until the target plugin connects.
 # This stage is rcS-blocked (lockstep) until then — that is expected.
 echo "[T5] Target PX4 SITL (instance 1, attaching to existing Gazebo)..."
-PX4_BUILD="$PX4_HOME/build/px4_sitl_default"
+PX4_BUILD="$PX4_HOME/build/$PX4_BUILD_TYPE"   # nolockstep binary when NO_LOCKSTEP=1
 TGT_WORKDIR="$PX4_BUILD/instance_1"
 mkdir -p "$TGT_WORKDIR"
 (cd "$TGT_WORKDIR" && \
@@ -263,8 +335,13 @@ mkdir -p "$TGT_WORKDIR"
 sleep 10
 
 # T6 — Target MAVROS
-echo "[T6] Target MAVROS..."
-roslaunch $PKG_DIR/launch/target_mavros.launch > /tmp/T6_${RUN_TAG}.log 2>&1 &
+if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
+    echo "[T6] Target MAVROS (nolockstep — timesync disabled)..."
+    roslaunch $PKG_DIR/launch/target_mavros_nolockstep.launch > /tmp/T6_${RUN_TAG}.log 2>&1 &
+else
+    echo "[T6] Target MAVROS..."
+    roslaunch $PKG_DIR/launch/target_mavros.launch > /tmp/T6_${RUN_TAG}.log 2>&1 &
+fi
 wait_topic "/target/mavros/state" 30 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1; }
 # Gate: target PX4 heartbeating through MAVROS (implies instance 1 attached to
 # Gazebo on TCP 4561 and rcS completed — heartbeats only start after that),
@@ -278,12 +355,55 @@ wait_fcu "/target/mavros/state" 60 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1
 # param sync (a few seconds after connect); a single immediate call failed.
 ZDN_OK=0
 for _i in 1 2 3 4 5 6; do
-  if rosrun mavros mavparam -n /target/mavros set MPC_Z_VEL_MAX_DN 2.0 >/dev/null 2>&1; then
+  if timeout 15 rosrun mavros mavparam -n /target/mavros set MPC_Z_VEL_MAX_DN 2.0 >/dev/null 2>&1; then
     ZDN_OK=1; echo "  target MPC_Z_VEL_MAX_DN=2.0 (try $_i)"; break
   fi
   sleep 5
 done
 [ "$ZDN_OK" = "1" ] || echo "  WARN: target Z_VEL_MAX_DN set failed after retries"
+# EKF2 noise scaling for nolockstep speedup.
+# In nolockstep, PX4's HRT = wall-clock (gettimeofday), but Gazebo physics runs at
+# real_time_factor=SPEED_FACTOR. EKF integrates IMU using wall-clock dt (= sim_dt/SPEED_FACTOR),
+# so GPS velocity/position innovations are SPEED_FACTOR× larger than 1× operation.
+# Bake SPEED_FACTOR²×default into eeprom via mavparam (eeprom persists; these calls
+# are idempotent updates — timeout protects against param-service hang).
+if [ "${NO_LOCKSTEP:-0}" = "1" ] && [ -n "${SPEED_FACTOR:-}" ] && [ "${SPEED_FACTOR}" != "1" ]; then
+    EKF_V=$(echo "$SPEED_FACTOR * $SPEED_FACTOR * 0.3" | bc)
+    EKF_P=$(echo "$SPEED_FACTOR * $SPEED_FACTOR * 0.5" | bc)
+    echo "  [EKF] nolockstep speed=${SPEED_FACTOR}x: EKF2_GPS_V_NOISE=$EKF_V  EKF2_GPS_P_NOISE=$EKF_P"
+    timeout 15 rosrun mavros mavparam set EKF2_GPS_V_NOISE "$EKF_V" >/dev/null 2>&1 && \
+        echo "  chaser EKF2_GPS_V_NOISE=$EKF_V" || echo "  WARN: chaser EKF2_GPS_V_NOISE set failed"
+    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_GPS_V_NOISE "$EKF_V" >/dev/null 2>&1 && \
+        echo "  target EKF2_GPS_V_NOISE=$EKF_V" || echo "  WARN: target EKF2_GPS_V_NOISE set failed"
+    timeout 15 rosrun mavros mavparam set EKF2_GPS_P_NOISE "$EKF_P" >/dev/null 2>&1 && \
+        echo "  chaser EKF2_GPS_P_NOISE=$EKF_P" || echo "  WARN: chaser EKF2_GPS_P_NOISE set failed"
+    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_GPS_P_NOISE "$EKF_P" >/dev/null 2>&1 && \
+        echo "  target EKF2_GPS_P_NOISE=$EKF_P" || echo "  WARN: target EKF2_GPS_P_NOISE set failed"
+    # Enable vision fusion (eeprom bakes AID_MASK=9; mavparam is belt-and-suspenders).
+    # EKF2_AID_MASK=9 = GPS(1<<0) + EV_position(1<<3=8). EVP_NOISE=0.05m baked in eeprom.
+    # HGT_MODE=3 (vision) also baked in eeprom; vision z dominates barometer.
+    # DOCX: post-alignment mavparam may not reshape active matrices; eeprom is primary.
+    timeout 15 rosrun mavros mavparam set EKF2_AID_MASK 9 >/dev/null 2>&1 && \
+        echo "  chaser EKF2_AID_MASK=9 (GPS+EVpos)" || echo "  WARN: chaser EKF2_AID_MASK set failed"
+    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_AID_MASK 9 >/dev/null 2>&1 && \
+        echo "  target EKF2_AID_MASK=9 (GPS+EVpos)" || echo "  WARN: target EKF2_AID_MASK set failed"
+    timeout 15 rosrun mavros mavparam set EKF2_HGT_MODE 3 >/dev/null 2>&1 && \
+        echo "  chaser EKF2_HGT_MODE=3 (vision)" || echo "  WARN: chaser EKF2_HGT_MODE set failed"
+    timeout 15 rosrun mavros mavparam -n /target/mavros set EKF2_HGT_MODE 3 >/dev/null 2>&1 && \
+        echo "  target EKF2_HGT_MODE=3 (vision)" || echo "  WARN: target EKF2_HGT_MODE set failed"
+fi
+# T6b — Vision GT bridge (nolockstep only).
+# Bridges /gazebo/model_states → /mavros/vision_pose/pose for both drones.
+# Publishes RELATIVE positions (spawn-zeroed) so EKF local-frame innovations are <1m.
+# (Absolute Gazebo world coords → 30+ m innovations → silently rejected, cs_ev_pos=0.)
+# AID_MASK=9: GPS(1) + EV_pos(8=1<<3). HGT_MODE=3: vision primary height.
+# EVP_NOISE=0.05m dominates GPS_P_NOISE=2.0m (40×) → EKF z stable → FlightTaskOffboard
+# gets non-oscillating EKF → velocity setpoints instead of thrust=0.001 fallback.
+if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
+    echo "[T6b] Vision GT bridge (Gazebo GT → EKF2 vision fusion)..."
+    rosrun drone_tracking gz_gt_to_vision.py > /tmp/T6b_${RUN_TAG}.log 2>&1 &
+    sleep 2
+fi
 # CHASER descent cap (T6/T7/T8 vertical trajectories ONLY, env-gated:
 # CHASER_ZDN=2.5). NOT unconditional: the 2026-07-11 regression-gate failure
 # showed the flat-T3 bench destabilized (pitch +/-10 deg, dist std 1.6) with
@@ -291,7 +411,7 @@ done
 # runs. Default = explicitly RESTORE the PX4 default 1.0 every run.
 CZDN=${CHASER_ZDN:-1.0}
 for _i in 1 2 3 4 5 6; do
-  if rosrun mavros mavparam set MPC_Z_VEL_MAX_DN "$CZDN" >/dev/null 2>&1; then
+  if timeout 15 rosrun mavros mavparam set MPC_Z_VEL_MAX_DN "$CZDN" >/dev/null 2>&1; then
     echo "  chaser MPC_Z_VEL_MAX_DN=$CZDN (try $_i)"; break
   fi
   sleep 5

@@ -183,13 +183,18 @@ def main():
     target_z   = SPAWN_Z
     target_yaw = chaser_yaw
 
-    # Find target SDF
-    sdf_candidates = [
-        os.path.expanduser(
-            "~/PX4-Autopilot/Tools/sitl_gazebo/models/target_iris_sitl/iris.sdf"),
-        os.path.expanduser(
-            "~/PX4-Autopilot/Tools/sitl_gazebo/models/iris/iris.sdf"),
-    ]
+    # Find target SDF — NO_LOCKSTEP=1 uses the nolockstep variant
+    no_lockstep = rospy.get_param("~no_lockstep", False) or os.environ.get("NO_LOCKSTEP") == "1"
+    if no_lockstep:
+        sdf_candidates = [os.path.expanduser(
+            "~/PX4-Autopilot/Tools/sitl_gazebo/models/target_iris_sitl_nolockstep/iris.sdf")]
+    else:
+        sdf_candidates = [
+            os.path.expanduser(
+                "~/PX4-Autopilot/Tools/sitl_gazebo/models/target_iris_sitl/iris.sdf"),
+            os.path.expanduser(
+                "~/PX4-Autopilot/Tools/sitl_gazebo/models/iris/iris.sdf"),
+        ]
     sdf_path = next((p for p in sdf_candidates if os.path.exists(p)), None)
     if sdf_path is None:
         rospy.logerr("[RandomSpawn] No target SDF found!"); return

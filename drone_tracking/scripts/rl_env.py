@@ -31,7 +31,7 @@ Usage:
   rosrun drone_tracking rl_env.py _mode:=probe
   rosrun drone_tracking rl_env.py _mode:=record _out:=~/rl_demos/T3_C1_s42.csv
 """
-import os, sys, csv, math, time
+import os, sys, csv, math, time, threading
 import numpy as np
 import rospy
 from geometry_msgs.msg import Point, Quaternion, PoseStamped
@@ -51,9 +51,54 @@ IMG_CX, IMG_CY = 320.0, 240.0
 F_PX = 277.19                  # live camera_info fx (same constant as IBVS)
 AREA_NORM = IMG_W * IMG_H
 
+# 2026-08-18 (supervisor): EXPLICIT-RATE observation — the finite-difference rates
+# dex/dey/dd carry the temporal info, so pitch/roll are DROPPED and frame-stacking
+# is OFF (single frame). a_prev kept for action continuity + the smoothness reward.
 OBS_NAMES = ["ex","ey","d_hat","dex","dey","dd","w","h","conf","t_nodet",
-             "pitch","roll","a_vx","a_vy","a_vz","a_wz"]
+             "a_vx","a_vy","a_vz","a_wz"]
 OBS_DIM = len(OBS_NAMES)
+
+# Reward params (FYP/RL/reward/Reward_Design.docx). Defaults are START values, all
+# rosparam-overridable. Three review-driven choices are baked in here:
+#  (1) per-frame P_lost is small (0.5), NOT the doc's 10 (−200/s re-opened the
+#      "suicidal agent" trap); the real loss deterrent is the SUSTAINED-loss terminal.
+#  (2) collision penalty (P_safe=150) > sustained-loss terminal (P_lost_final=100):
+#      when a loss looks inevitable the agent must NEVER score better by RAMMING the
+#      target (−150) than by losing it (−100). This is the hard 2 m safety bar in
+#      reward form. (Original ordering was loss>collision — reversed in review because
+#      per-frame P_lost is now mild, so the suicide trap it guarded against is closed.)
+#  (3) the centering bonus (+A) is paid ONLY on a valid detection (see compute_reward),
+#      so a frozen (lost) frame can't collect the alive bonus. Living (a tracked step,
+#      +A) still dominates either terminal, so no suicide door reopens.
+REWARD_DEFAULTS = dict(
+    A=1.0, sigma=0.3,          # centering (alive bonus): peaks +A when centered (valid only)
+    w_d=0.5, band_lo=6.0, band_hi=7.0,   # distance band: 0 inside [6,7] m, linear outside (GT)
+    w_s=0.05,                  # smoothness: −w_s·‖a_t−a_(t−1)‖²
+    P_lost=0.5,                # per-frame keep-in-view penalty (detection lost)
+    d_min=2.0, P_safe=150.0,   # collision: d_true<d_min → terminal, −P_safe (> loss terminal)
+    loss_secs=5.0, P_lost_final=100.0,   # sustained loss>5s → terminal, −P_lost_final (supervisor 2026-08-18)
+)
+
+def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost):
+    """Shaped reward + terminal flag. p = params dict (see REWARD_DEFAULTS). GT (d_true,
+    t_lost) is legal here — reward is training-only. Returns (reward, terminated, reason)."""
+    # centering bonus is paid ONLY on a real detection — a frozen (lost) frame keeps
+    # ex/ey at their last value, which must not earn the alive bonus.
+    r_center = (p['A'] * math.exp(-(ex*ex + ey*ey) / (p['sigma']**2))) if valid else 0.0
+    if math.isnan(d_true):        r_band = 0.0
+    elif d_true < p['band_lo']:   r_band = -p['w_d'] * (p['band_lo'] - d_true)
+    elif d_true > p['band_hi']:   r_band = -p['w_d'] * (d_true - p['band_hi'])
+    else:                         r_band = 0.0
+    da = np.asarray(a) - np.asarray(prev_a)
+    r_smooth = -p['w_s'] * float(np.dot(da, da))
+    r_lost = -p['P_lost'] if valid == 0 else 0.0
+    reward = r_center + r_band + r_smooth + r_lost
+    terminated = False; reason = ""
+    if (not math.isnan(d_true)) and d_true < p['d_min']:
+        reward -= p['P_safe']; terminated = True; reason = "collision"
+    elif t_lost > p['loss_secs']:
+        reward -= p['P_lost_final']; terminated = True; reason = "lost"
+    return reward, terminated, reason
 
 
 class ObsBuilder(object):
@@ -64,6 +109,12 @@ class ObsBuilder(object):
         self.k          = float(rospy.get_param("~alpha_dist_k", 0.077))
         self.pitch_comp = float(rospy.get_param("~pitch_comp", 1.3))   # launch default
         self.rate_lpf   = float(rospy.get_param("~rate_lpf", 0.6))     # EMA on rates
+        # zero_aprev: feed ZEROS into the 4 a_prev obs slots so the policy CANNOT see
+        # its own last action -> removes the positive-feedback runaway channel (the 2026-
+        # 08-17 SAC finding). self.a_prev still tracks the REAL last action for the
+        # smoothness reward (that path is unaffected). Default False = v1 obs unchanged;
+        # SAC v2 passes ~zero_aprev:=true and uses a clone RETRAINED with a_prev zeroed.
+        self.zero_aprev = bool(rospy.get_param("~zero_aprev", False))
         # raw detection state
         self.cx = self.cy = float('nan'); self.alpha = 0.0
         self.box_w = self.box_h = 0.0; self.conf = 0.0
@@ -75,15 +126,20 @@ class ObsBuilder(object):
         self.f_ex = self.f_ey = 0.0; self.f_d = 0.0; self.f_w = self.f_h = 0.0
         self.dex = self.dey = self.dd = 0.0
         self._prev = None                                  # (t, ex, ey, d)
-        # last action (captured IBVS cmd in probe/record; policy action in env mode)
+        # a_prev = the PREVIOUS action carried in the observation (policy action in
+        # env mode; managed by the record loop in record mode). latest_cmd = the
+        # freshest IBVS command captured by the tap — kept SEPARATE from a_prev so
+        # the recorded label is never leaked into the observation (see _run_record).
         self.a_prev = np.zeros(4, dtype=np.float32)
+        self.latest_cmd = np.zeros(4, dtype=np.float32)
         self.caps = np.array([float(rospy.get_param("~max_vx", 8.0)),
                               float(rospy.get_param("~max_vy", 1.2)),
                               float(rospy.get_param("~max_vz", 2.5)),
                               float(rospy.get_param("~max_wz", 0.5))], dtype=np.float32)
-        # ground truth (record extras / future reward — NEVER enters the obs)
+        # ground truth (record extras / reward / recovery scaffolding — NEVER in the obs)
         self.true_dist = float('nan')
-        self._names_idx = None
+        self.rel_w = (float('nan'), float('nan'), float('nan'))  # target−chaser, world XYZ
+        self.chaser_yaw = 0.0                                    # chaser heading (world)
 
         rospy.Subscriber('/drone_tracking/target_center', Point, self._center_cb, queue_size=1)
         rospy.Subscriber('/drone_tracking/target_box', Quaternion, self._box_cb, queue_size=1)
@@ -119,19 +175,22 @@ class ObsBuilder(object):
         self.roll = math.atan2(sr, cr)
 
     def _gz_cb(self, m):
-        if self._names_idx is None:
-            ch = tg = None
-            for i, n in enumerate(m.name):
-                if 'iris' in n and 'target' not in n and ch is None: ch = i
-                if 'target' in n: tg = i
-            if ch is None or tg is None: return
-            self._names_idx = (ch, tg)
-        ch, tg = self._names_idx
+        # exact model names, matching flight_logger.gazebo_cb ('iris' / 'target_iris')
         try:
-            c, t = m.pose[ch].position, m.pose[tg].position
+            ic = m.name.index('iris'); it = m.name.index('target_iris')
+        except ValueError:
+            return
+        try:
+            c, t = m.pose[ic].position, m.pose[it].position
             self.true_dist = math.sqrt((c.x-t.x)**2 + (c.y-t.y)**2 + (c.z-t.z)**2)
+            # GT relative vector (world) + chaser yaw — TRAINING-ONLY, used by _recover to
+            # re-acquire a target lost in ANY direction (never enters the observation).
+            self.rel_w = (t.x - c.x, t.y - c.y, t.z - c.z)
+            q = m.pose[ic].orientation
+            self.chaser_yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y),
+                                         1.0 - 2.0*(q.y*q.y + q.z*q.z))
         except IndexError:
-            self._names_idx = None
+            pass
 
     # ---- assembly --------------------------------------------------------
     def _t_since_det(self):
@@ -157,14 +216,18 @@ class ObsBuilder(object):
             self._prev = (now, ex, ey, d)
             self.f_ex, self.f_ey, self.f_d = ex, ey, d
             self.f_w, self.f_h = self.box_w, self.box_h
-            conf = self.conf
+            conf = self.conf if not math.isnan(self.conf) else 0.0
         else:
             # LOCKED dropout rule: freeze position features, zero rates, conf=0
             self.dex = self.dey = self.dd = 0.0
             self._prev = None
             conf = 0.0
 
-        t_nd = self._t_since_det()
+        if self.t_last_det is None:
+            t_since_raw = 999.0
+        else:
+            t_since_raw = (rospy.Time.now() - self.t_last_det).to_sec()
+        t_nd = min(t_since_raw, 1.0)
         obs = np.array([
             np.clip(self.f_ex, -1.5, 1.5),
             np.clip(self.f_ey, -1.5, 1.5),
@@ -176,12 +239,12 @@ class ObsBuilder(object):
             np.clip(self.f_h / 100.0, 0.0, 3.0),
             np.clip(conf, 0.0, 1.0),
             t_nd,
-            np.clip(self.pitch / 0.5, -1.0, 1.0),
-            np.clip(self.roll  / 0.5, -1.0, 1.0),
-            self.a_prev[0], self.a_prev[1], self.a_prev[2], self.a_prev[3],
+            # pitch/roll REMOVED (explicit-rate obs, 2026-08-18). a_prev slots: zeroed
+            # when ~zero_aprev; the real self.a_prev still drives the smoothness reward.
+            *(np.zeros(4, dtype=np.float32) if self.zero_aprev else self.a_prev[:4]),
         ], dtype=np.float32)
         raw = dict(cx=self.cx, cy=self.cy, alpha=self.alpha, d_hat=self.f_d,
-                   valid=int(self.valid), conf=conf, t_nodet=t_nd,
+                   valid=int(self.valid), conf=conf, t_nodet=t_nd, t_since_raw=t_since_raw,
                    pitch_deg=math.degrees(self.pitch), roll_deg=math.degrees(self.roll),
                    true_dist=self.true_dist)
         return obs, raw
@@ -195,7 +258,7 @@ class IbvsActionTap(object):
         rospy.Subscriber('/mavros/setpoint_raw/local', PositionTarget, self._cb, queue_size=1)
     def _cb(self, m):
         a = np.array([m.velocity.x, m.velocity.y, m.velocity.z, m.yaw_rate], dtype=np.float32)
-        self.b.a_prev = np.clip(a / self.b.caps, -1.0, 1.0)
+        self.b.latest_cmd = np.clip(a / self.b.caps, -1.0, 1.0)   # NOT a_prev (no label leak)
 
 
 if _GYM:
@@ -205,12 +268,29 @@ if _GYM:
         (returns the current obs — target re-randomization comes in Step 3)."""
         metadata = {"render_modes": []}
 
-        def __init__(self, ctrl_hz=20.0):
+        def __init__(self, ctrl_hz=20.0, episode_secs=None):
             super().__init__()
             self.observation_space = spaces.Box(-3.0, 3.0, shape=(OBS_DIM,), dtype=np.float32)
             self.action_space = spaces.Box(-1.0, 1.0, shape=(4,), dtype=np.float32)
             self.ob = ObsBuilder()
             self.dt = 1.0 / ctrl_hz
+            # Episode length (Option A): truncate at max_episode_secs. RESET IS
+            # RESET-FREE — no teleport of either drone (avoids the PX4 EKF instability
+            # that teleports caused historically); the target keeps flying, an episode
+            # is just a bounded time-window, and truncation is bootstrapped (not terminal).
+            self.max_episode_secs = float(episode_secs if episode_secs is not None
+                                          else rospy.get_param("~episode_secs", 100.0))
+            self._ep_t0 = None
+            self._ep_steps = 0
+            # first-reset handoff window: HOVER (keepalive) for this long so IBVS can be
+            # killed WITHOUT the policy ever stepping against it. The overlap-fight — the
+            # RL policy stepping aggressively while a live IBVS also commands — drove the
+            # target off-frame in every failed run; hovering during the kill removes it.
+            self._first_reset = True
+            self._handoff_wait = float(rospy.get_param("~handoff_wait", 6.0))
+            # reward params (rosparam-overridable; defaults = REWARD_DEFAULTS)
+            self._rp = {k: float(rospy.get_param("~rew_" + k, v))
+                        for k, v in REWARD_DEFAULTS.items()}
             self.pub = rospy.Publisher('/mavros/setpoint_raw/local', PositionTarget, queue_size=1)
             self._msg = PositionTarget()
             self._msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
@@ -218,43 +298,225 @@ if _GYM:
                                    PositionTarget.IGNORE_PZ | PositionTarget.IGNORE_AFX |
                                    PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
                                    PositionTarget.IGNORE_YAW)
+            # control-rate clock: rospy.Rate ABSORBS the SAC gradient-step time so the
+            # effective loop stays ~20 Hz (a bare sleep(dt) would drift to ~13-15 Hz once
+            # a gradient step is added on top of every env step).
+            self._rate = rospy.Rate(ctrl_hz)
+            # OFFBOARD keepalive: PX4 drops OFFBOARD after ~0.5 s without a setpoint.
+            # A daemon thread republishes the last command at 20 Hz so the gaps during
+            # SAC gradient steps, checkpoint/replay-buffer saves (seconds) and the
+            # reset()-recovery wait never starve the stream. step()/reset() only UPDATE
+            # self._msg (under the lock); the thread guarantees continuity.
+            self._msg_lock = threading.Lock()
+            self._alive = True
+            # keepalive stays SILENT until the first reset(): the env is often
+            # constructed while IBVS is still flying (e.g. during the seconds-long
+            # replay-buffer prefill before the handoff). If the keepalive published a
+            # hover setpoint during that window it would FIGHT the IBVS setpoints on the
+            # same topic — the first live run showed that contention slowly de-centering
+            # the target until IBVS lost it and flew off in SEARCH. So it only starts
+            # streaming once training actually begins and we hand control over.
+            self._ka_active = False
+            self._ka = threading.Thread(target=self._keepalive, daemon=True)
+            self._ka.start()
+
+        def _keepalive(self):
+            r = rospy.Rate(20)
+            while self._alive and not rospy.is_shutdown():
+                if self._ka_active:
+                    with self._msg_lock:
+                        self._msg.header.stamp = rospy.Time(0)  # Time(0) → MAVROS uses FCU time
+                        self.pub.publish(self._msg)
+                r.sleep()
+
+        def _set_cmd(self, vx, vy, vz, wz):
+            """Atomically update + publish the setpoint the keepalive thread holds."""
+            with self._msg_lock:
+                self._msg.velocity.x = float(vx); self._msg.velocity.y = float(vy)
+                self._msg.velocity.z = float(vz); self._msg.yaw_rate = float(wz)
+                self._msg.header.stamp = rospy.Time(0)  # Time(0) → MAVROS uses FCU time
+                self.pub.publish(self._msg)      # immediate; thread republishes between steps
+
+        def close(self):
+            self._alive = False
 
         def step(self, action):
             a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+            prev_a = np.asarray(self.ob.a_prev, dtype=np.float32).copy()   # a_(t-1) for smoothness
             v = a * self.ob.caps
-            self._msg.header.stamp = rospy.Time.now()
-            self._msg.velocity.x, self._msg.velocity.y, self._msg.velocity.z = float(v[0]), float(v[1]), float(v[2])
-            self._msg.yaw_rate = float(v[3])
-            self.pub.publish(self._msg)
-            self.ob.a_prev = a
-            rospy.sleep(self.dt)
+            self._set_cmd(v[0], v[1], v[2], v[3])
+            self.ob.a_prev = a                       # closed loop: a_prev = own action
+            self._rate.sleep()                       # paced 20 Hz (absorbs gradient-step time)
             obs, raw = self.ob.build()
-            reward = 0.0            # Step 4 (Reward_Design.docx)
-            terminated = False      # Step 4: collision / sustained-loss
-            truncated = False       # Step 4: fixed episode time (Option A)
+            self._ep_steps += 1
+            elapsed = (rospy.Time.now() - self._ep_t0).to_sec() if self._ep_t0 else 0.0
+            reward, terminated, reason = compute_reward(
+                self._rp, a, prev_a, float(obs[0]), float(obs[1]),
+                raw['true_dist'], raw['valid'], raw['t_since_raw'])
+            truncated = (not terminated) and (elapsed >= self.max_episode_secs)  # Option A
+            if terminated:                        # diagnostic: which terminal + where
+                rospy.loginfo("[rl_env] TERMINAL %s after %d steps: d_true=%.2f t_lost=%.1f ex=%.2f ey=%.2f",
+                              reason, self._ep_steps, raw['true_dist'], raw['t_since_raw'],
+                              float(obs[0]), float(obs[1]))
+            raw['elapsed'] = elapsed; raw['ep_steps'] = self._ep_steps
+            raw['reward'] = reward; raw['term_reason'] = reason
             return obs, reward, terminated, truncated, raw
 
         def reset(self, seed=None, options=None):
+            # RESET-FREE: no teleport. But EVERY episode must start from a VALID, SAFE
+            # tracking state. Unlike the BC teacher, a learning policy ends episodes on a
+            # terminal (collision / sustained-loss) — so without recovery the next
+            # episode would start already-lost or already-too-close and instantly
+            # re-terminate, flooding the replay buffer with 1-step −P episodes. _recover()
+            # holds a hover, waits for a detection, gently retreats if too close, and
+            # slow yaw-sweeps if still lost. It is TRAINING SCAFFOLDING (IBVS SEARCH is
+            # offline during RL) that runs ONLY between episodes → it never enters an
+            # observation the policy learns from, so the RL controller stays pure.
             super().reset(seed=seed)
+            self._ka_active = True            # training starts now -> take over the stream
+            if self._first_reset:
+                self._first_reset = False
+                # hold a pure hover while IBVS is killed — the policy must NOT step yet
+                rospy.loginfo("[rl_env] HANDOFF: hovering %.1fs — kill IBVS now.", self._handoff_wait)
+                t0 = rospy.Time.now()
+                while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < self._handoff_wait:
+                    self._set_cmd(0, 0, 0, 0)
+                    rospy.sleep(0.05)
+            self._recover()
+            self.ob.a_prev = np.zeros(4, dtype=np.float32)   # fresh smoothness baseline
+            self._ep_t0 = rospy.Time.now()
+            self._ep_steps = 0
             obs, raw = self.ob.build()
             return obs, raw
+
+        def _recover(self, timeout=25.0):
+            """Establish a STABLE, IN-BAND, CENTERED start before each episode (see reset()).
+            GT-DRIVEN (training-only scaffolding, never in the obs): drives the chaser to
+            band-centre range, matched altitude, and facing the target, then requires ~0.5 s
+            of stable framed frames. The old version yaw-scanned in place, which could NOT
+            recover a VERTICAL loss (target above the FOV) — that stalled the 2026-08-17
+            anchored run into 28 one-step losses. Using GT here re-acquires a loss in ANY
+            direction and guarantees every episode starts framed, so a transient loss during
+            learning is never permanent. Falls back to the hover/yaw-scan if GT is missing."""
+            lo, hi = self._rp['band_lo'], self._rp['band_hi']
+            d_star = 0.5 * (lo + hi)
+            r = rospy.Rate(20); t0 = rospy.Time.now(); settle = 0
+            while not rospy.is_shutdown():
+                el = (rospy.Time.now() - t0).to_sec()
+                if el > timeout:
+                    rospy.logwarn("[rl_env] _recover timed out (%.0fs); starting anyway", timeout)
+                    self._set_cmd(0, 0, 0, 0); return
+                td = self.ob.true_dist
+                # --- success gate: a REAL detection, in band, roughly centered ---
+                framed = self.ob.valid and (math.isnan(td) or
+                         (lo - 0.4 <= td <= hi + 0.4 and abs(self.ob.f_ey) < 0.35
+                          and abs(self.ob.f_ex) < 0.35))
+                if framed:
+                    self._set_cmd(0, 0, 0, 0); settle += 1
+                    if settle >= 10:                      # ~0.5 s stable framed -> go
+                        return
+                    r.sleep(); continue
+                settle = 0
+                # --- GT reposition toward {band-centre range, matched altitude, facing} ---
+                rel = self.ob.rel_w
+                if not any(math.isnan(v) for v in rel):
+                    dx_w, dy_w, dz = rel
+                    rng = math.hypot(dx_w, dy_w)
+                    yaw = self.ob.chaser_yaw
+                    dbeta = math.atan2(dy_w, dx_w) - yaw
+                    dbeta = math.atan2(math.sin(dbeta), math.cos(dbeta))     # wrap to [-pi,pi]
+                    if rng > 1e-3:
+                        mag = max(-1.5, min(1.5, 0.6 * (rng - d_star)))      # +approach / -back off
+                        vxw, vyw = mag * dx_w / rng, mag * dy_w / rng
+                    else:
+                        vxw = vyw = 0.0
+                    cy, sy = math.cos(yaw), math.sin(yaw)                    # world -> body
+                    vx_b =  cy * vxw + sy * vyw
+                    vy_b = -sy * vxw + cy * vyw
+                    vz = max(-1.5, min(1.5, 0.8 * dz))                       # match altitude
+                    wz = max(-0.6, min(0.6, 1.2 * dbeta))                    # face -> centers it
+                    self._set_cmd(vx_b, vy_b, vz, wz)
+                else:
+                    self._set_cmd(0, 0, 0, 0.4 if el > 1.0 else 0.0)        # no GT -> yaw scan
+                r.sleep()
+
+
+# --------------------------- policy runner (Step 2) ---------------------------
+def _run_policy(ob, bc_path, run_secs):
+    """CLOSED-LOOP: the BC policy flies the drone (replaces IBVS). Publishes body
+    velocities at 20 Hz, a_prev = its OWN last action, frame-stack N=4 built here.
+    This is the copycat test — a pure a_prev-echo would drift immediately.
+    NB: no external safety filter (per design). A test-only hover-on-lost guard
+    prevents a runaway if the target is lost > 3 s; it is NOT part of the controller."""
+    import torch
+    from collections import deque
+    from rl_train_bc import BCPolicy
+    ck = torch.load(bc_path, map_location='cpu', weights_only=False)
+    net = BCPolicy(obs_dim=64); net.load_state_dict(ck['state_dict']); net.eval()
+    caps = np.array(ck['caps'], dtype=np.float32)
+    pub = rospy.Publisher('/mavros/setpoint_raw/local', PositionTarget, queue_size=1)
+    msg = PositionTarget(); msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
+    msg.type_mask = (PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY |
+                     PositionTarget.IGNORE_PZ | PositionTarget.IGNORE_AFX |
+                     PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
+                     PositionTarget.IGNORE_YAW)
+    rospy.loginfo("[rl_env] POLICY mode — BC (%s) flying for %.0fs. No external filter.",
+                  os.path.basename(bc_path), run_secs)
+    r0 = rospy.Rate(20)
+    while not rospy.is_shutdown() and not ob.valid:   # wait for first detection
+        r0.sleep()
+    stack = deque([ob.build()[0]] * 4, maxlen=4)
+    a = np.zeros(4, dtype=np.float32)
+    rate = rospy.Rate(20); t0 = rospy.Time.now(); n = 0; lost_since = None
+    while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < run_secs:
+        ob.a_prev = a                          # closed loop: a_prev = own last action
+        obs, raw = ob.build()
+        stack.append(obs)
+        x = np.concatenate(stack).astype(np.float32)[None]      # (1,64) oldest..newest
+        with torch.no_grad():
+            a = net(torch.from_numpy(x))[0].numpy()
+        # test-only safety (NOT the controller): hover if target lost > 3 s
+        if ob.valid:
+            lost_since = None
+        elif lost_since is None:
+            lost_since = rospy.Time.now()
+        if lost_since is not None and (rospy.Time.now() - lost_since).to_sec() > 3.0:
+            v = np.zeros(4, dtype=np.float32); tag = "LOST->HOVER"
+        else:
+            v = np.clip(a, -1.0, 1.0) * caps; tag = ""
+        msg.header.stamp = rospy.Time(0)  # Time(0) → MAVROS uses FCU time
+        msg.velocity.x, msg.velocity.y, msg.velocity.z = float(v[0]), float(v[1]), float(v[2])
+        msg.yaw_rate = float(v[3]); pub.publish(msg)
+        if n % 20 == 0:                        # ~1 Hz status
+            print(f"t+{(rospy.Time.now()-t0).to_sec():4.0f}s  ex{obs[0]:+.3f} ey{obs[1]:+.3f}"
+                  f"  d_hat{raw['d_hat']:5.2f} true{raw['true_dist']:5.2f}"
+                  f"  v[{v[0]:+.2f},{v[1]:+.2f},{v[2]:+.2f},{v[3]:+.3f}] {tag}", flush=True)
+        n += 1; rate.sleep()
+    for _ in range(10):                        # leave a clean hover (avoid failsafe jerk)
+        msg.header.stamp = rospy.Time(0)       # Time(0) → MAVROS uses FCU time
+        msg.velocity.x = msg.velocity.y = msg.velocity.z = 0.0; msg.yaw_rate = 0.0
+        pub.publish(msg); rate.sleep()
+    rospy.signal_shutdown("policy run done")
 
 
 # --------------------------- probe / record mains -----------------------------
 def _run_probe(ob):
     tap = IbvsActionTap(ob)
-    rospy.loginfo("[rl_env] PROBE mode — read-only; printing obs at 2 Hz. Ctrl-C to stop.")
+    secs = float(rospy.get_param("~probe_secs", 12.0))   # self-terminate (clean flush)
+    rospy.loginfo("[rl_env] PROBE mode — read-only; obs at 2 Hz for %.0f s.", secs)
     rate = rospy.Rate(2)
     hdr = " ".join(f"{n:>8s}" for n in OBS_NAMES)
-    n = 0
-    while not rospy.is_shutdown():
+    n = 0; t0 = rospy.Time.now()
+    while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < secs:
+        ob.a_prev = ob.latest_cmd            # display the live IBVS command in a_* cols
         obs, raw = ob.build()
         if n % 10 == 0:
-            print("\n" + hdr + "   | d_hat  valid true_dist")
+            print("\n" + hdr + "   | d_hat  valid true_dist", flush=True)
         print(" ".join(f"{v:8.3f}" for v in obs) +
-              f"   | {raw['d_hat']:5.2f}  {raw['valid']}     {raw['true_dist']:5.2f}")
+              f"   | {raw['d_hat']:5.2f}  {raw['valid']}     {raw['true_dist']:5.2f}", flush=True)
         n += 1
         rate.sleep()
+    rospy.signal_shutdown("probe done")
 
 
 def _run_record(ob):
@@ -268,12 +530,15 @@ def _run_record(ob):
     rospy.loginfo("[rl_env] RECORD mode -> %s (20 Hz, read-only). Ctrl-C to stop.", out)
     rate = rospy.Rate(20)
     rows = 0
+    prev = np.zeros(4, dtype=np.float32)     # a_(t-1): the PREVIOUS IBVS command
     while not rospy.is_shutdown():
+        ob.a_prev = prev                     # obs carries a_(t-1); NOT the label -> no leak
         obs, raw = ob.build()
-        a = ob.a_prev            # normalized IBVS action captured from the setpoint topic
+        label = ob.latest_cmd.copy()         # a_t: the CURRENT command = the decision to imitate
         wcsv.writerow([f"{rospy.Time.now().to_sec():.3f}"] +
-                      [f"{v:.5f}" for v in obs] + [f"{v:.5f}" for v in a] +
+                      [f"{v:.5f}" for v in obs] + [f"{v:.5f}" for v in label] +
                       [raw['valid'], f"{raw['d_hat']:.3f}", f"{raw['true_dist']:.3f}"])
+        prev = label                         # advance a_(t-1)
         rows += 1
         if rows % 600 == 0:
             f.flush(); rospy.loginfo("[rl_env] %d rows", rows)
@@ -288,5 +553,9 @@ if __name__ == "__main__":
     ob = ObsBuilder()
     if mode == "record":
         _run_record(ob)
+    elif mode == "policy":
+        _run_policy(ob,
+                    os.path.expanduser(rospy.get_param("~bc", "~/fyp/rl/models/bc_policy_v2.pth")),
+                    float(rospy.get_param("~run_secs", 30.0)))
     else:
         _run_probe(ob)

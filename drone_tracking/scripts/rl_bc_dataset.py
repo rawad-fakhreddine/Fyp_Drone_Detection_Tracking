@@ -41,7 +41,8 @@ import numpy as np
 K_CAL      = 0.077
 CAPS       = np.array([8.0, 1.2, 2.5, 0.5], dtype=np.float32)
 RATE_LPF   = 0.6
-ASPECT_R   = 2.0
+ASPECT_R   = 3.3     # measured live box aspect (w~43px / h~13px at 6-7 m); was 2.0
+CONF_PROXY = 0.85    # live YOLO conf ~0.8 on REAL frames; was a 1.0 proxy
 AREA_NORM  = 640.0 * 480.0
 STACK_N    = 4
 OBS_NAMES  = ["ex","ey","d_hat","dex","dey","dd","w","h","conf","t_nodet",
@@ -72,8 +73,10 @@ def f(row, key, default=float('nan')):
         return default
 
 def convert_file(path):
-    """-> (X (n,16), Y (n,4), t (n,)) for tracking-regime rows of one run."""
-    X, Y, T = [], [], []
+    """-> (X (n,16), Y (n,4), t (n,), d_true (n,)) for tracking-regime rows of one run.
+    d_true = Gazebo ground-truth 3-D distance (for reward recompute in the RL prefill;
+    the BC trainer ignores it)."""
+    X, Y, T, D = [], [], [], []
     d_prev = None; dd = 0.0; t_prev = None
     t_last_real = None; a_prev = np.zeros(4, dtype=np.float32)
     with open(path) as fh:
@@ -102,14 +105,16 @@ def convert_file(path):
                 obs = normalize(
                     f(row,'ex_ctrl',0), f(row,'ey_ctrl',0), d,
                     f(row,'dex',0), f(row,'dey',0), dd,
-                    w, h, 1.0, t_nd,
+                    w, h, CONF_PROXY, t_nd,
                     math.radians(f(row,'pitch_deg',0)), math.radians(f(row,'roll_deg',0)),
                     a_prev)
                 X.append(obs); Y.append(cmd_n); T.append(t)
+                D.append(f(row, 'true_dist_3d'))     # GT distance for RL reward recompute
             else:
                 d_prev = None; dd = 0.0        # rate chain breaks outside tracking
             a_prev = cmd_n
-    return np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32), np.array(T)
+    return (np.array(X, dtype=np.float32), np.array(Y, dtype=np.float32),
+            np.array(T), np.array(D, dtype=np.float32))
 
 def stack(X, T):
     """(n,16),(n,) -> (m, 16*STACK_N) oldest-first, only over contiguous time."""
@@ -126,14 +131,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--src', default=os.path.expanduser('~/fyp/Results/Config1'))
     ap.add_argument('--since', default='2026-08-06')
+    ap.add_argument('--until', default='2026-12-31',
+                    help='exclude CSVs dated AFTER this (keeps RL-contaminated runs out; '
+                         'e.g. --until 2026-08-16 drops the post-handoff thrash CSVs)')
     ap.add_argument('--out', default=os.path.expanduser('~/fyp/rl/datasets/bc_v1.npz'))
     ap.add_argument('--val-files', type=int, default=3, help='newest N files held out for validation')
+    ap.add_argument('--zero-aprev', action='store_true',
+                    help='zero the 4 a_prev columns (12:16) so the clone learns to IGNORE its '
+                         'own last action -> removes the closed-loop runaway channel (SAC v2). '
+                         'Pair with rl_env ~zero_aprev:=true at deploy.')
     a = ap.parse_args()
 
     files = []
     for p in sorted(glob.glob(os.path.join(a.src, 'traj*_zone*_*.csv'))):
         m = re.search(r'_(\d{4}-\d{2}-\d{2})_', p)
-        if m and m.group(1) >= a.since: files.append(p)
+        if m and a.since <= m.group(1) <= a.until: files.append(p)
     if not files:
         print("no files matched"); return
     print(f"{len(files)} files since {a.since}")
@@ -142,8 +154,10 @@ def main():
     tr, va = {'X':[], 'Y':[], 'Xs':[], 'Ys':[]}, {'X':[], 'Y':[], 'Xs':[], 'Ys':[]}
     kept = 0
     for p in files:
-        X, Y, T = convert_file(p)
+        X, Y, T, _D = convert_file(p)          # _D (GT dist) used by the RL prefill, not BC
         if len(X) < STACK_N: continue
+        if a.zero_aprev and len(X):
+            X[:, 12:16] = 0.0                  # a_vx,a_vy,a_vz,a_wz -> ignored by the clone
         Xs, idx = stack(X, T)
         dst = va if p in val_set else tr
         dst['X'].append(X); dst['Y'].append(Y)

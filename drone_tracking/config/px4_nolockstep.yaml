@@ -1,0 +1,21 @@
+# MAVROS config for nolockstep 4x simulation
+# Timesync ENABLED: with use_sim_time=false, both MAVROS and PX4 use wall-clock time.
+# synchronise_stamp() maps ROS wall-epoch time → PX4 boot-relative time_boot_ms correctly.
+# Without timesync, Time(0) stamps come out as wall-epoch (~56 years to PX4) → rejected.
+
+startup_px4_usb_quirk: false
+
+conn:
+  heartbeat_rate: 1.0
+  timeout: 10.0
+  timesync_rate: 10.0      # ENABLED — MAVROS measures wall→boot offset from PX4
+  system_time_rate: 1.0
+
+sys:
+  min_voltage: 10.0
+  disable_diag: false
+
+time:
+  time_ref_source: "fcu"
+  timesync_mode: MAVLINK   # ENABLED — synchronise_stamp uses the measured offset
+  timesync_avg_alpha: 0.6

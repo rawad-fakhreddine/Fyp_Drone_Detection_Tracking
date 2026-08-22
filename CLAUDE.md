@@ -2,48 +2,28 @@
 ## AI-Based Drone-to-Drone Detection and Tracking
 **Student:** Rawad Fakhredine | **Supervisor:** Dr. Ibrahim Sammour | **Program:** Masters in Robotics
 
-> **Changelog**
-> - **2026-08-15 — RL DESIGN COMPLETE (5 missions, 6 Word docs in `FYP/RL/`) + IMPLEMENTATION STARTED (all-ADDITIVE: 4 new `rl_*.py`, ZERO edits to C1/C2 code — verified via git status; sealed backup `~/fyp/code_backups/baseline_2026-08-15_pre-RL/`).** **Design locked with Rawad:** OBSERVATION `[ex,ey_c,d̂,ėx,ėy,ḋ,w,h,conf,t_since_det,pitch,roll,a_(t-1)]`(16) + frame-stack N=4 (rates AND stacking; raise N if curves lag; LSTM fallback); dropout=FREEZE+conf0; normalization table in doc §7. ACTION continuous `[vx,vy,vz,wz]` tanh→caps `[8,1.2,2.5,0.5]`; NO external safety filter (Rawad: control=ONLY RL) → safety LEARNED via reward. REWARD = Gaussian centering (+alive bonus, kills the suicidal-agent trap) − band − smoothness − P_lost − P_safe, GT legal (training-only); **episodes Option A: fixed 30-40 s OR terminal collision(−50) OR sustained loss>3 s(−100, largest — closes the P_lost suicide door); timeout=truncation.** ALGORITHM **SAC primary** (sample efficiency = the binding constraint at ~1× RTF) + PPO baseline + TD3 optional; privileged critic WILL be used. **Implementation:** `rl_env.py` (ObsBuilder from live topics, pitch-comp ey = ibvs :597 math, probe/record modes read-only; gym stub) · `rl_bc_dataset.py` (**BC data found IN the existing logs** — logger v2 has pitch/roll, ex_ctrl/ey_ctrl, dex/dey, cmd_*; only w/h/conf missing and the TEACHER never uses them → filled from α+aspect; **158,727 tracking-regime pairs from 52 calibrated-baseline C1 runs**) · `rl_train_bc.py` (**BC v1 TRAINED: held-out RMSE vx 0.066/vy 0.024/vz 0.053 m/s/wz 0.003 rad/s ≈ the teacher's own noise floor**, 58 s on the 4060, `~/fyp/rl/models/bc_policy_v1.pth`, dims=SB3 SAC actor for weight surgery) · `rl_train_sac.py` (online skeleton, blocked on env Steps 3-4). **SEARCH scope DECIDED (Rawad, same day): keep it BASIC — not a milestone focus; the existing SEARCH behaviour stays as-is, shared identically by all 3 configs (runs only after tracking has failed → ablation still compares the tracking controllers fairly); RL is scoped to the TRACKING regime (P_lost = prevention over recovery).** **NEXT: probe-validate obs vs a live IBVS flight → Step 2 action loop → Step 3 reset (reset-free first) → Step 4 reward → SAC.** RL artifacts live in `~/fyp/rl/` (outside repo, per results rule). **COMMITTED + pushed to GitHub (this commit).**
-> - **2026-08-14 — NEW MILESTONE OPENED: RL REPLACES THE CONTROLLER (Config 3) — design phase, lit-grounded; RL Word doc created + deck slides 30-32; k=0.077 re-verified against code. NO code yet.** Supervisor directive (2026-08-11 meeting; he was SATISFIED with the C1/C2 finals + multiview + 4-view PNGs): **RL replaces the CONTROL block ONLY — YOLO perception stays.** Pipeline becomes `YOLOv8 (frozen) → detection features → RL policy → body-velocity → PX4`; **C1 (YOLO+IBVS) and C2 (YOLO+KF+IBVS) become the BASELINE** the RL agent (Config 3) must beat on the same 8-traj / 8-seed matrix. NB distinct from the parked PPO v5.2 ("DRL-tunes-IBVS", PPO supplied α*/λ) — **here RL IS the controller.** **Deliverables this session:** `FYP/RL/RL_Milestone_Design.docx` (observation/action/reward/algorithm/related-work) + deck slides 30-32 (in v13; v12 was locked). **`k=0.077` (`~alpha_dist_k`) RE-VERIFIED against the live code** (`ibvs_controller_node.py:223` node default + `launch_stack.sh:320` = 0.077; formula `d_hat=√(alpha_dist_k/alpha)` at :644); honest caveat recorded — **k is an EMPIRICAL band-specific fit (α·d_true² vs Gazebo GT over ~48k frames in the 5–8 m band), NOT an exact analytic constant** (pinhole raw would be ~0.0625; 0.096 was the mis-cal that over-read ~13%). **THE 5 OPEN DESIGN QUESTIONS (Rawad's missions before next meeting, being worked one at a time):** (1) **OBSERVATION** — history depth (how much past YOLO / a_(t-1)) + what else to add; (2) **ACTION** — continuous confirmed, clarify the discrete-vs-continuous framing; (3) **REWARD** — validate the "increase reward as ex/ey/d approach target" shaping + which Gazebo GT terms are legal (reward may use GT, observation may not); (4) **ALGORITHM/TRAINING** — online vs offline vs both, PPO vs SAC, BC warm-start; (5) **RELATED WORK** — how many algorithms to actually try. See `[[rl-milestone-config3]]`. Lit found: Luo'18 (A3C active tracking, discrete can't match speed), Zhang'22 (SAC raw-image→2D vel), AgilePilot'25 (PPO+YOLO pose), Tuncer'23 (drone-to-drone PPO, closest), Tello+YOLO+DDPG, Sampedro'18/Fu'23 (DRL-tunes-IBVS); + DRQN/frame-stacking for POMDP, asymmetric actor-critic (privileged critic) for sim training, BC warm-start.
-> - **2026-08-07 — CONSOLIDATED CURRENT BASELINE + full C1/C2 DELIVERABLE RUN (16 multiview recordings). NOT committed (deliverable = data).** **DEPLOYED BASELINE now (commits `699bedb` uniform-config + `3d863be` calibration):** `d_lpf=0.5` UNIFORM · **`alpha_dist_k=0.077`** (CALIBRATED — d_hat honest) · standoff **[6,7] m UNIFORM on ALL trajectories** · **`traj_track_kp=1.0`** target path-lock (acts on T1/4/5/8) · **Option B** (`INCLINE_NO_HREVERSE=1` forward + vertical-zigzag, NO horizontal reverse) for T6/T7 · **vertical package** (`KP_Z=6/MAX_VZ=2.5/MAX_ACCEL_VZ=6/KI_Z=2.0/INT_Z_MAX=1.3/INT_Z_BLEED=0.70/CHASER_ZDN=2.5`) for T6/T7/T8 · `SPAWN_YAW=96` for T2/T3. Validated C1/s42 T1–T8: **custody 100 %, HOLD 95–98 %, hold-TRUE 6.4–6.8 m (correct band), closest safer on 7/8.** **THE THREE FIXES THIS SESSION (all ROOT-CAUSED, not symptom patches):** **(1)** open-loop target DRIFT on the 3D plots → enable the pre-existing `~traj_track_kp` (target-side, C1=C2, doesn't touch the controller): T1 wander **4.0→0.26 m** (a point), T4 radius **5.7-10.1→7.9-8.5 m** + Zdrift 2.82→0.44 m, T5/T8 clean. **(2)** standoff **unified to [6,7]** (removed [9,11] from T5–T8): the [9,11] "incursion-envelope" necessity is SUPERSEDED because Option B removes T7's reversal corners + the vertical package keeps it framed at 6 m; only T5's lemniscate crossover still sweeps to ~2.7 m (target-driven geometry, >2 m bar, safe). **(3)** the SMOOTH-DECELERATION goal = a **d_hat MEASUREMENT bug, NOT a control-law defect**: measured `α·d_true²` vs Gazebo GT over 48k frames = ~0.077, but `alpha_dist_k` was 0.096 → d_hat over-read ~13 % (+0.5 m) → chaser held at true ~5.5 m believing 6 m and the decel cap engaged late; recalibrated 0.096→**0.077** → holds true 6–7 m, shallower/safer arrival. **Three near-band control gadgets were built, tested, and REMOVED before finding the root cause** (kept the baseline clean): `approach_smooth` v1 closing-rate cap (no authority — read biased d_hat), `approach_smooth` v2 target-speed match `v_t=d_rate+prev_vx` (self-referential → violent instability at useful gain, same reason M11.2 `vx_ff` was rejected), `decel_damp` (kept Kd alive → amplified near-band noise → more jerk). **LESSON: a persistent "overshoot / holds at wrong distance / can't tune it out" on the distance controller can be a d_hat CALIBRATION bug — check α·d² vs GT before adding mechanisms.** **DELIVERABLE RUN (this session):** all 16 (T1–8 × C1/C2, seed 42, 150 s) re-recorded on the calibrated baseline with the **3-panel MULTIVIEW** (chaser FOV + spectator overlook + live 3D) → per-trajectory folders `~/fyp/Results/deliverable_s42/T{n}_{name}/` = C1+C2 mp4 + 3D PNG + `results.xlsx` (+ `ALL_trajectories_summary.xlsx`); old drifting-target deliverable + 3D graphs archived to `OneDrive FYP/OLD_data`. Tools: `deliverable_s42_cal.sh` (recorder batch, MULTIVIEW=1 SPECTATOR=1, resume-safe, memory-gated) + `build_deliverable_cal.py` (assembler from `csv_manifest.txt` + staged clips). **NEXT: full 8-seed C1/C2 matrix re-fly at the calibrated baseline** — everything above is seed-42 tuning evidence, not final comparison numbers (per the uniform-parameter rule §17).
-> - **2026-08-06 (session 3) — d_hat CALIBRATION `alpha_dist_k` 0.096→0.077 BAKED + validated T1–T8; the smooth-deceleration root fix. COMMITTED.** The residual arrival overshoot / hold-too-close was NOT a control-law defect — `d_hat=√(k/α)` was mis-calibrated. **Measured `α·d_true²` against Gazebo GT over 48k detected frames → ~0.077 in the 5–8 m band, not 0.096** → the old k made `d_hat` over-read ~13 % (+0.5 m), so the chaser held at TRUE ~5.5 m believing it was 6 m, and the decel cap (which reads `d_hat`) engaged ~0.5 m late. **Recalibrated to 0.077 (`~alpha_dist_k` default in node + launch_stack).** Validated live C1/s42 (hard trajectories first per Rawad): **all 8 now hold at TRUE 6.4–6.8 m** (was 5.5–6.0, too close); **custody 100 % everywhere; HOLD 95–98 % (maintained/improved on 6/8); det maintained; closest-approach SAFER on 7/8** (T6 4.49→5.61, T7 4.69→5.02, T2 5.17→6.08, T1 4.76→5.22…); **T5 crossover 2.65→2.73 unchanged** (that pass is the TARGET sweeping in = geometry, not a decel overshoot). Safety envelope now reads honest `d_hat` → its stopping ceiling is slightly MORE conservative (safe). **Three near-band "smooth-decel" gadgets were tried and REJECTED before finding the root cause** (all removed, code kept clean): (1) `approach_smooth` closing-rate cap — no authority (read biased `d_hat`); (2) `approach_smooth` v2 target-speed match `v_t=d_rate+prev_vx` — self-referential → violent instability at useful gain (2.98 m + emerg brake, same reason the M11.2 `vx_ff` was rejected); (3) `decel_damp` (keep Kd alive) — amplified near-band `d_hat` noise → more jerk. **Lesson: the "overshoot/holds-close" symptom was a measurement-calibration bug, not a controller bug.** NB single-seed tuning evidence → the full 8-seed C1/C2 matrix re-fly at k=0.077 is still pending. Sealed backup + repo refreshed. **This baseline (uniform config + path-lock + Option B + k=0.077) COMMITTED.**
-> - **2026-08-06 (session 2) — UNIFORM-STANDOFF + TARGET-PATH-LOCK + Option-B executed & VALIDATED live (C1/s42, 150 s); approach_smooth (decel bounce fix) still pending. NOT committed.** **(1) `d_lpf` → 0.5 UNIFORM** (launch_stack default 0.70→0.50; the T3-scoped-0.5 hack deleted — the low-pass is untouched from here, decel jerk moves to the vx law). **(2) STANDOFF → [6,7] m on ALL trajectories** (removed [9,11] from T5–T8) and **VALIDATED**: T5 custody 100 / HOLD 92 / closest 2.65 m; T6 100/98/4.49; T7 100/98/4.69; T8 100/98/4.08. **The prediction that 6-7 m would break T7 was WRONG** — that was the OLD *shuttle* T7; **Option B (`INCLINE_NO_HREVERSE=1` on T6/T7: forward + vertical zigzag, NO horizontal reverse) removes the reversal corners and the vertical package keeps the target framed at 6 m → the [9,11] "incursion-envelope" necessity is SUPERSEDED for Option-B T6/T7/T8.** Only tradeoff: T5's lemniscate crossover now sweeps to 2.65 m (was ~6.6 m) — safe (>2 m bar, no abort) but the closest pass on the set. T6/T7 forward-only stayed on-island in 150 s (294 / 378 m). **(3) TARGET-PATH-LOCK: `TRAJ_TRACK_KP=1.0` enabled** (was default-off; `target_mover` `~traj_track_kp` pulls the closed-form targets onto their exact `_ideal_pos`, gated to t∈{1,4,5,8}) — fixes the OPEN-LOOP target DRIFT Rawad caught on the 3D plots: T1 **4.0/3.0/2.5→0.26/0.21/0.40 m** (now a point), T4 radius **5.7-10.1→7.9-8.5 m** + Zdrift **2.82→0.44 m** (clean circle), T5 Zdrift **2.76→0.45 m**, T8 radius **→7.7-8.7 m**. TARGET-side/scenario setting, identical C1/C2 → does NOT touch the chaser controller or the uniform rule; HOLD/det unaffected (92-98 / 96-100). Changes the T1/4/5/8 target GT → part of the pending re-fly. **(4) STILL PENDING:** `approach_smooth` (opt-in tanh vx field: fixes the below-band hard-retreat that makes the 8↔5 limit cycle — F7 drains the cruise integrator below the band so a MOVING target falls behind; the fix keeps cruise + gentle tanh retreat = damped 8→6→5→5.5→6.5→6 settle, no lag, doesn't touch the low-pass) + the vertical-package uniform-rule ruling + full-matrix re-fly + deliverable re-record. Files: launch_stack.sh, ms6_run_cells.sh (both synced to repo mirror). **This baseline COMMITTED (this commit) as the verified-good starting point per Rawad ("our code now is perfect, save it"); sealed backup at `~/fyp/code_backups/baseline_2026-08-06_uniform-config/`. `approach_smooth` + the pending items are developed opt-in/default-off UNDER TEST and only baked into the committed code once proven.**
-> - **2026-08-06 — UNIFORM-PARAMETER RULE locked by Rawad + smooth-vx re-scoped as a GLOBAL mechanism (discussion, NOT yet coded).** **(1) THE RULE (Rawad, §17, hard):** for FINAL / comparison results every trajectory must run the **IDENTICAL controller — NO control-law parameter may differ from one trajectory to another.** Per-trajectory overrides are allowed for TESTING/diagnostics ONLY, never for reported numbers. A universal "improvement" must be neutral-or-better on ALL trajectories at ONE value; if it needs per-trajectory scoping to stay safe, the MECHANISM is wrong — fix the mechanism, don't scope the value. **(2) This flags the `D_LPF=0.5`-on-T3 scoping** (`ms6_run_cells.sh` case 3) **as a rule violation.** Why it exists: `~d_lpf` is an EMA on `d_hat` whose LAG both smooths the T1/T2 approach-and-stop jerk AND makes the fast 3.5 m/s T3 chase overshoot to 0.45 m — benefit and harm are the **same lag**, so no single `d_lpf` value is globally safe. **(3) Correct fix (no per-traj scoping) = a distance-shaped velocity field `~approach_smooth` (tanh/saturation: full closing speed far from the band, finite-slope taper INTO the band, NO estimate lag)** → ONE value smooths the slow-stop trajectories without the fast-chase overshoot; then `d_lpf` returns to a single global value. Designed earlier (memory `decel-slew-smooth-stop`), **NOT in code** (grep: no tanh/approach_smooth). **(4) T4 question answered:** T4 ran the plain env = global `D_LPF=0.70` → it WAS tested WITH the smooth-decel on; its ~flat vx-jerk (0.106→0.106) is single-seed noise, not a regression. **(5) OPEN TENSION surfaced (Rawad to rule on):** the sealed matrix ALSO varies per-trajectory the standoff band (`D_HOLD/D_STAR` [9,11] on T5–T8) and the vertical package (`KP_Z/KI_Z/MAX_VZ/…` on T6–T8) — principled (setpoint sized to the geometric incursion envelope; 3D trajectories need vertical authority) but still per-trajectory changes → whether the uniform rule extends to them or only to core control-law gains needs a decision. T3 0%-HOLD label fix stands. NOT committed.
-> - **2026-08-03 — T3 "0 %-HOLD label artifact" ROOT-CAUSED and FIXED (1-line, verified live); per-trajectory DELIVERABLE structure built + 4.2 GB reclaimed; before/after (smooth-decel + vz/az) table generated. Continuation of the 2026-08-01/02 smooth-decel + vz work. NOT committed.** **(1) THE T3 0 %-HOLD ARTIFACT SOLVED (the "cosmetic bimodality" from the sealed-matrix seal + the supervisor's flagged item):** Rawad caught it on the multiview clip — target 6 m away, in-FOV, centered, still labelled APPROACH. Data proof from the sealed `T3_C1_s47.csv`: the HOLD gate's three terms — `|ex|`=0.007 ✓, d_hat in [6,7] 93 % ✓, but **RAW `|ey|`=0.24 ✗ (> the 0.12 gate)**. Root cause: the HOLD *label* gate (`ibvs_controller_node.py:901`) checked the **raw** vertical pixel error, which the steady nose-down cruise pitch of the fast 3.5 m/s T3 chase biases to ~0.24 — while the *controller* de-rotates that pitch and drives **`ey_c`=0.031 in-band** (holding perfectly). HOLD *latches* on entry, so on the 2/8 seeds (s45, s47) where raw-ey never transiently dips < 0.12, the whole run reads 0 % HOLD; the other 6 catch the latch on a noise dip → ~97 %. All 8 seeds are otherwise IDENTICAL (band-occ 93–94 %, ey_c 0.03). **Fix: gate HOLD on the pitch-compensated `self.ex_c`/`self.ey_c` the controller already computes (line 909), not raw pixels.** `ex_c ≡ raw ex` (no horizontal pitch coupling) and `ey_c ≤ raw ey` always → the gate can only CONFIRM a hold, never break one → **byte-safe for every other trajectory/config (all already labelled HOLD).** Verified live: T3/s47 **0 → 97.3 %**, s42 97.5 %, custody 100 %, closest ~5.5 m; offline re-label of the whole matrix → all 8 T3 seeds ~93–94 % (C1 matrix HOLD 73→~93, C2 56→~93; nothing else moves). **DECISION PENDING: whether to re-seal the matrix HOLD column (offline re-derivable from logged `ey_ctrl`, no re-fly) — Rawad's call.** **(2) T2/T3 SPAWN-YAW fix (earlier this session):** zone-1 spawn yaw is a RANDOM draw; my one-way T2/T3 runs pointed south into a tree (custody drop / 39 s abort) while the matrix flew ~96° north. Fix `SPAWN_YAW=96`, baked into `ms6_run_cells.sh` cases 2 & 3. T2/T3 now reproduce the matrix (custody 100 %, HOLD ~97 %, north). **(3) Smooth-decel + vz/az (2026-08-01/02, carried in):** `~d_lpf` 0.5→**0.70** global default (EMA on d_hat kills the approach-and-stop Kd jerk — root cause was Kd amplifying noisy d_rate, NOT the integrator) but **scoped back to 0.5 on the FAST T3** (0.70 lag let the rear-end chase overshoot to 0.45 m); new **`~max_accel_vz`** (default = max_accel = 3, byte-compat) decouples the vz slew, set to **6** with **`KP_Z=6`** in the T6/7/8 vertical package for faster vertical RESPONSE + REVERSAL (T7 fwd-zigzag det 77→89→98 %). All in `ms6` env_for_traj. **(4) DELIVERABLE RESTRUCTURE (Rawad's standing rule — "always record multiview + 3D png + results-as-Excel, one folder per trajectory"):** new tools `make_3d_png.py` (clean world-frame 3D traj, target=blue/chaser=red) + `build_deliverable.py` (per-traj folder = C1+C2 mp4 + 3D PNG + `_results.xlsx`; + `ALL_trajectories_summary.xlsx`). Output `~/fyp/Results/deliverable_s42/` (T1_static … T8_helix), synced to OneDrive `FYP/Results/11_Multiview_Recordings/deliverable_s42/`. **Reclaimed 4.2 GB** (deleted 2.5 GB loose duplicate `multiview_*.mp4` + the 1.7 GB flat `all_C1C2_s42`, both superseded by the organized copies — verified all 17 clips present before delete). **(5) Before/after table (C1, seed 42, `BEFORE_AFTER_smoothdecel_vz.xlsx`):** HOLD **maintained 94–99 % on all 8** (Rawad's hard requirement — the changes did NOT break HOLD); det maintained ~100 %; **smooth-decel win is clean on the approach-and-stop trajectories: T1 vx-jerk 0.061→0.020 (−67 %), T2 0.059→0.033 (−44 %)**; orbit/vertical vx-jerk + closest vary within single-seed noise (matrix used 8 seeds — a multi-seed before/after is the publication-grade version if needed). All seed-42; the sealed 8-seed matrix stays the authoritative numbers. NOT committed.
-> - **2026-07-15→19 — OFFICIAL MATRIX FLOWN AND SEALED: 128/128 (T1–T8 × 8 seeds {42,43,45–50} × C1/C2, zone 1, 200 s) on uniform final code; FINAL_TABLES.md sealed; 16 demo clips re-recorded (ALL seed 42); safety-envelope family completed; COMMITTED (this commit).** **(1) Campaign protocol that beat the degradation:** 4 fresh-boot chunks (T1+T2 / T3+T4 / T5+T6 / T7+T8, `wsl --shutdown` between), per-chunk T3 health-bench gate (det≥99, HOLD≥85 — passed every chunk), per-run gates: memavail<2.5 GB halt · within-run in-FOV-det canary (≥25-pt decline or <60 halts) · tracking gate (track%=in-FOV-fraction<85 / dur<195 s / closest<1.5 m halt; 1.5–2.0 m = recorded F8 WARN) · resume-safe ledger. Runner **`ms6_run_cells.sh`** (committed) carries the per-trajectory scenario env (T2/T3 STRAIGHT_AZ=away one-way; T5 standoff 9–11/d*=10; T6/T7 vertical package+away; T8 package; T1/T4 plain). **Per-run code-provenance stamps** (`code_stamp.sh` → .code.txt per run; era timeline `00_Summary/CODE_HISTORY.md`) — Rawad's directive after the "know what code produced which data" point. `fan_boost.sh` = Windows power-plan switch hooked into launch/cleanup. **(2) Safety-envelope family (Rawad's 2 m bar drove all of it; each found by the stop-rule, fixed, regression-gated):** **F7** below-band integrator trap (HOLD 0 % with PERFECT tracking; 1-line discharge-only integration below band floor) · **R1** absolute stopping ceiling vx≤√(2·a_dec·margin) (noisy d_rate had disabled the decel cap → 1.93 m dive) · **R1b** `~d_safe_margin`=1.0 (close-range d_hat over-reads ~0.9 m BOTH configs → 1.87 m WITH R1 binding) · **R1c** relative-closure term v_tgt=max(−d_rate−max(prev_vx,0),0) subtracted from the ceiling (the envelope must stop the GAP, not the chaser — T4 orbit swept the target inward at 2 m/s → 1.76 m) · **R2** d_hat updates ONLY on REAL detections (predictions steer, never teach distance). New rosparams `~pred_vx_hold`/`~pred_accel_max`/`~d_safe_margin` + launch knobs. **(3) Results (`09_Official_Matrix/FINAL_TABLES.md`, every number machine-generated):** custody (target-in-FOV after first det = the headline effectiveness metric, resolves the deferred metric decision) **100 % on T1–T6/T8 both configs, 98.9 % both on T7 (0 aborts ×16 — pre-package T7 aborted 100 %)**; phase-HOLD 94–98 everywhere except the T3 entry-lottery bimodality (cosmetic — 0 %-label runs settle at the same 5.96±0.09 m, ~99 % band-occ; code untouched, uniformity rule); **yaw jerk C2 1.6–3.3× smoother on ALL 8 trajectories, every one p<0.01 paired (t=−5.9…−34.9) = THE C1-vs-C2 difference, the old T3-only finding replicated matrix-wide**; everything else statistical parity. **Safety: 3 sub-2 m passes in 128 runs, all C1, all guarded F8 corner passes (1.62/1.84/1.97 m); C2 in-matrix worst 2.33 m** (vs 18 archived 0.34–1.98 m pre-hardening passes) — scoped DISTRIBUTIONAL not categorical (a demo re-record later put one C2 corner at exactly 1.50 m, F8-registered). **F6 recurred exactly as predicted** (T2/C1/s46: uniform det 90.4 %, yaw-jerk ×2, 20 s emerg chatter; C2 twin on the identical draw spotless → the strongest single-run KF exhibit; now CHARACTERIZED, 2 instances, 1/64 C1 runs). **(4) Deliverables (all synced to OneDrive FYP/Results):** `09_Official_Matrix/` (128 named CSVs + FINAL_TABLES.md + matrix_final_metrics.csv + generator scripts + campaign ledger), `08_Failures/FAILURES.md` F1–F8, `07_Demo_Videos/` 16 fresh clips ALL seed 42 (same-draw C1-vs-C2 pairs, old clips removed, before_fixes/ kept; viewing notes: T3_C2 label reads APPROACH — systematic on s42, 3/3 flights; T7_C2 1.50 m boundary pass kept per failures-are-data). **(5) THIS COMMIT = the entire final code state** (IBVS with the full envelope, launch_stack hooks, mover v10.10, logger, viewer, sync v2, demo_recorder v1.1, `robust_run.sh`, `rec16.sh`, campaign+analysis tools). NEXT: C1-vs-C2 report/Word update from FINAL_TABLES (content-only per Rawad's deck feedback) + the F1–F8 failure-registry thesis narrative.
-> - **2026-07-14 — F1 collision defect found+fixed (C2 PRED-sprint), failure registry established, T1/T2 8-seed campaign flown, POLLUTION EVENT → Rawad reset: RE-RUN ALL SIMULATIONS.** **(1) F1 (P1-class, found by the ms4 campaign):** T1/C2/s43 near-collision 0.34 m — during a 1.5 s detection dropout the KF's alpha-velocity (trained by a retreat) extrapolated the target AWAY, the controller floored vx=8 m/s blind through the static target; alpha-emergency can't trip on falling believed-alpha. C2-architectural (C1 miss-hold can't sprint on extrapolation). **Fix (final v2, default-ON): `~pred_vx_hold` + `~pred_accel_max`=1.0 — on PRED frames cmd_vx ≤ last-REAL vx +0.3 +1.0·t_pred** (rate-limited chase; blind sprint needs >5 s PRED, KF stops at 1.5 s); verified s43 0→98.7 %, s42 regression clean; 39-flight audit: 32 provably unchanged. v1 hard-freeze REJECTED — but its "T7 cost" verdict was itself polluted data (see 3). **(2) Failure registry** `Results_reference/08_Failures/FAILURES.md` (Rawad's directive: failures = kept data): F1 fixed, F2 T5-crossover fixed, F3 T7-vertical fixed, F4 degradation protocol, F5 seed-44, F6 T2/s43 C1 rough-flight loop (33 s emerg chatter, in-FOV det 81 % uniform, C2 twin clean 100 % — the KF-smoothness counter-argument). **T1/T2 8-seed tables:** T1 C1 97.4±0.5 / C2 97.5 (post-fix); T2 C1 97.4±0.4 (s43=F6) / C2 97.5±0.7 0 emerg. 8-seed T3 paired stats: HOLD parity (t=−0.25) but **yaw-jerk C2 3× smoother on EVERY seed (0.061 vs 0.190 m/s², disjoint) = the one real C1-vs-C2 difference; parity is ENGINEERED (C1's in-controller filters replicate the KF except on the raw-ex yaw axis).** **(3) POLLUTION EVENT: degradation onset at ~65-70 sims with memory HEALTHY (5.5 GB)** — new signature: in-FOV det DECLINES within runs (96→84 % first/last third), PRED ×10, small-target trajectories (T7) hit first; discriminator run (guard OFF = old code) scored the same 67.7 → code exonerated, machine guilty. All 07-14 T7-C2 re-flights + the T7_C2.mp4 re-record = quarantined. **Canary upgraded: within-run in-FOV-det trend (harness halts on ≥25-pt decline), NOT memavail.** **(4) RAWAD'S RESET: re-run the ENTIRE 8×8×2 matrix (128 runs) from scratch on fresh boots, chunked ~45 runs/boot with `wsl --shutdown` between — no reuse.** Also: demo pipeline (`demo_recorder.py` v1.1 sim-time-sampled mp4s ×1 speed, RECORD=1 stage; 16 clips + before_fixes/ archived pair), curated-reference split (OneDrive `Results` = reference w/ README+summaries+videos, `Results_raw` = batch mirror, sync_results v2 two-target), C1-vs-C2 Word report in 00_Summary. NOT committed.
-> - **2026-07-12 (session 2) — TRUE-T7 SOLVED: the 3-lever VERTICAL PACKAGE (carrier + authority + standoff) lifts HOLD 38.6→95.5 % mean, seed-consistent 3/3, T6/T8 neutral; system-degradation verdict CONFIRMED on fresh boot; MAX_VZ-alone REFUTED.** **(1) Fresh-boot bench (WSL restarted, 5.5 GB free): plain defaults reproduce the seal** — det 99.8 % (was 38 % in the 3 degraded runs), HOLD 91, FOV 100, settled dist std 0.218 / vx std 0.065, alt +0.05, 0 emerg → the late-night failures were 100 % system-side; det%-canary protocol stands. **(2) Clean MAX_VZ=2.5+CHASER_ZDN=2.5 A/B (T7 z1, seeds 42/43): authority alone REJECTED** — not seed-consistent (HOLD 19.4/46.7 vs stock 57.5/29.6, both B runs aborted); yesterday's "84 %" was single-run noise (the T5 lesson). **(3) Whole-chain vz audit (Rawad's "look at all details" directive) found the EQUATION defect: the vertical channel was pure P+D in practice** — Ki_z·int_z_max·gain = 0.04·0.2·0.7 = **0.0056 m/s** vs the 1.72 m/s T7 legs (same defect class as the M11.2 vx integrator ceiling), so sustained-leg tracking needs ey_ss = 1.72/(0.7·3.0) = **0.82 > the 0.8 clip = frame edge** — *impossible at any authority*; measured: ey_ctrl rides +0.24 (desc) / −0.19 (climb), cmd_vz −0.56 vs the needed −1.72 → **the controller PARKED the target in the detector's worst edge band, so part of the "det ~70 % T7 residual" was control-caused, not detector-caused.** The M10.3 "Kp_z FLAT / vertical channel closed" seal was measured on the descent-CAPPED T7 → scoped, not overturned. Rawad's wz suspicion tested & CLEARED (|ey| identical at |roll|>8° vs <3°; loss-onset |cmd_wz| median 0.05, |roll| 1.1°). **(4) Carrier alone DIES AT THE BOUNCE CORNERS (cells C/D/E, HOLD 17–25, all aborts):** at reversal the integrator charges wrong-way ~1.2 s (ey flips only when the chaser physically overshoots) then bleeds late → 3.25 m vertical swing vs the ±4 m frame window at 6.5 m standoff; cell E (int_z_max 1.3 + bleed 0.70) survived 2 corners then hit the **alt_floor=11 conflict** (target overshoots its own floor to ~11.0 → chaser pinned at the guard while the target reverses up). Corner swing ≈ physics (reaction+momentum) → gains can't fix it at close range. **(5) The GEOMETRIC lever: standoff [9,11]/d*=10** — frame window ±0.8·d = ±6.3 m at 10 m = the whole T7 bounce half-span fits; detection still ≥97 % recall (18–21 px); dissolves the alt_floor conflict. Standoff ALONE (stock law, cell G) is WORSE than baseline (37.1, abort) — Occam control proving the interaction. **(6) PACKAGE (KI_Z=2.0 INT_Z_MAX=1.3 INT_Z_BLEED=0.70 MAX_VZ=2.5 CHASER_ZDN=2.5 D_HOLD_MIN/MAX=9/11 D_STAR=10): T7 HOLD 94.5/98.0/93.9 (s42/43/45), det ~97 %, FOV 99.8 %, closest ~3 m, ALL 200 s complete** vs paired stock baselines 57.5/29.6/28.6 (2/3 abort, closest 0.61–1.54 m); oscillation guard clean (ey zero-cross 0.07–0.09/s vs the 0.21 disqualifier; cmd_vz sign-flips once per ~12 s = the bounce period = tracking, not ringing). **T6/T8 spot-check with the package: T6 98.4 / T8 97.7, det ≥99.4, 0 emerg = neutral vs the 98 bars → the package is the STANDARD SCENARIO ENV for T6/T7/T8.** **Code: rosparams `~Ki_z`/`~int_z_max`/`~int_z_bleed` (defaults 0.04/0.2/1.0 = byte-for-byte legacy; bleed = multiplicative discharge when ey opposes the integral), launch knobs KI_Z/INT_Z_MAX/INT_Z_BLEED; banner keeps "Kp_z=… max_vz=…" contiguous (m12 freeze-grep compat). Plain run = the sealed T3 controller, unchanged — nothing baked.** **(7) T5 SOLVED by the same standoff principle, same day:** 3-seed characterization → T5 is **bimodal by spawn geometry** (1/3 seeds park the chaser ON the crossover axis → the figure-eight sweeps THROUGH the [6,7] band: distance whipsaw 2–10 m, loss at a 2.1 m pass; even "good" seeds thread crossovers at 1.8–2.5 m, s45 surviving on 12 s of emergency brake). **Wide standoff [9,11] ONLY (no carrier, T5 is level): s42 52.7→98.6 (abort→complete), s43 98.4, s45 97.1 — all 0 emergency, closest ~6.6 m (was ~2 m).** **UNIFYING PRINCIPLE: size the standoff band to the trajectory's geometric INCURSION ENVELOPE** (T7 = frame's vertical window ∝ d; T5 = crossover lobe clearance); [6,7] stays for non-invading T1–T4. **STEP-3 HARDENING COMPLETE: T1–T8 all ≥94 % on Config 1.** NEXT: step-4 C2 paired on the hard trajectories (T7 package + T5 wide, seeds {42,43,45}) → Kalman-improvement pass. NOT committed.
-> - **2026-07-12 — M11.3 step-3 hardening session: T7 vertical-authority breakthrough, the "filtered box" mystery solved (viewer-side EMA), the eeprom-persistence + system-degradation lessons; MAX_VZ bake DEFERRED pending fresh-boot re-test.** **(1) T5 re-flight: HOLD 97 % (vs 45 % the day before, same code) → T5 is HIGH-VARIANCE at its lemniscate crossovers (min 2.3 m, 36 emerg frames, recovers) — characterize with ≥3 seeds before any change.** **(2) True-T7 loss mechanism found from loss-onset analysis (24/25 onsets IN-FOV at ~35° elevation, ~10 m, ~13 px): the chaser's `max_vz`=1.5 < the target's 1.72 m/s climb → chaser sinks below, target rides the TOP frame edge, detector drops it.** Fix `MAX_VZ=2.5` + chaser `MPC_Z_VEL_MAX_DN=2.5` → **HOLD 34–55→84 %**, onset elevation 35→30°. NB the M10.3 "vertical channel closed / max_vz FLAT" seal was measured against the DESCENT-CAPPED T7 (see M11.2 audit) and does NOT apply to the true 35° T7. Residual T7: det ~70 % (frame-edge small-target misses) + 0.8 m through-pass. **(3) The "delayed/filtered/Kalman-like" C1 label box Rawad kept seeing = viewer v1.6.1's display-side `~box_smooth`=0.6 EMA (60 % previous box), NOT detection and NOT control** (the controller consumes target_center; the published box is raw `raw_cx,raw_cy,w,h` — code-verified). **Viewer v1.6.2: box_smooth default → 0.0 RAW**; Rawad confirmed the raw box is precise and contains the drone. Remaining honest box imperfections: ~50 ms inference trail during fast in-frame motion (box drawn on a newer image; camera already 30 Hz, box rate is inference-bound ~20 Hz) + 13-px edge-noise breathing → the real perception lever stays native camera resolution (RUNG 2). **(4) mavparam writes PERSIST across runs via PX4 eeprom** — launch_stack now explicitly restores chaser `MPC_Z_VEL_MAX_DN` every run (`CHASER_ZDN` env, default 1.0; pass 2.5 with MAX_VZ=2.5 for vertical trajectories T6/T7/T8) and sets target DN=2.0 via a 6×5 s retry loop (single immediate call fires before FCU param sync and fails). **(5) Late-night regression-gate scare = SYSTEM DEGRADATION, not code:** 3 consecutive broken benches (dist std 1.6–1.8, pitch ±10–12°, **det 88 % vs 99.5 %**, collapse mid-run 100→57 % det) after ~40 sims; bisect cleared MAX_VZ, chaser-DN and the mover (target GT identical); WSL2 7 GB RAM / 2 GB free = memory pressure → frame drops. **Protocol lessons: det % is the CANARY (check before blaming the controller); re-baseline after ~30 sims or on any det % drop; restart WSL between marathons.** NEXT: fresh-boot bench → re-test MAX_VZ=2.5 A/B clean → bake with CHASER_ZDN → T5 3-seed characterization → T7 residual. Tools: `traj_verify.py` gained CSV-clock DT (logger is 20 Hz, NOT 10 — assumed-DT halves all speeds). NOT committed.
-> - **2026-07-11 — M11.2 controller FINALIZED on the T3 bench + first 8-seed campaigns; launch defaults BAKED (plain run = tuned controller); PLAN RESET by Rawad: bench campaigns are tuning evidence, NOT final comparisons.** All changes OFAT (one knob per flight), each verified in flight + SNAP frames read. **(1) 6–7 m decel-reaccel hunt SOLVED:** root = integrator ceiling Ki·int_d_max·gain = 1.2·3.0·0.70 = 2.52 m/s < the 3.5 m/s target cruise → in-band coast could never match target speed. Fix `~int_d_max` 3→6 + conditional integration `~int_band`=2.5. Velocity feedforward (`~vx_ff`, v_t=prev_vx+d_rate) REJECTED (self-referential → bounced off the emergency wall, vx std 4.0, emerg 6%); Ki=1.8 REJECTED (over-drive). **(2) violent start oscillation SOLVED:** the v6.26 dodge fired during NORMAL approach (trigger d<5.0 vs band [6,7]) → −4 m/s slams to 17 m ×23/run; `~min_dist` 3.5→2.5 (trigger 4.0 = 2 m under the band floor) → 0 emergency engagements in every flight since (22+). **(3) descent overshoot SOLVED:** decel cap was gated e_d>0 → switched OFF at band entry → barrelled to 4.9 m; re-referenced to the band CENTRE with the integrator's learned cruise as baseline, + `~a_dec` 2.5→2.0, `~d_lpf` 0.6→0.5 (descent now monotonic). **(4) phantom-cruise dive SOLVED:** integrator charged to ~3.5 against the still-STATIC target during descent → dove ~2 m past the band (dive depth = f(launch timing) = the same-seed transient variance); `~int_bleed` hacks REJECTED (v1 drained cruise in HOLD → dist std 1.46 catastrophe); winner `~int_hold_only`=1. **(5) int_hold_only RACE DEADLOCK — found ONLY by the 8-seed campaign, both configs, 3/16 flights:** target launches before first band entry → HOLD never entered → integrator never charges → pure-P locks at e_ss=3.5/(2.5·0.70)=2.0 m above band-top (≈8.5 m, HOLD 0%, det 100%). Fix (1 line): `allow_int = HOLD or (e_d>0 and d_rate>−0.1)` — gap-rate separates the phantom-cruise descent (closing→block) from a stalled chase (steady/opening→charge). Verified seed-50 HOLD 0→97%; campaign-2 partials: deadlocks gone, launch-bounce −2 m, dip ~1 m deeper (4.7–5.7, still 0 emerg), settled unchanged. **(6) full-axis audit (Rawad: "not only vx"):** settled HOLD cmd_vy std .003–.007 / cmd_wz .005–.008 / cmd_vz .05–.07 / cmd_vx .12 (0.33 zero-cross/s = wander) / ex,ey_ctrl ±.001 → oscillation at the NOISE FLOOR on every axis. Only defect: **+0.26 m altitude bias** (controller sees ey_ctrl=0 → residual in pitch de-rotation, ~2.6° short at the 7.9° cruise pitch; scales with speed: −0.02@static/+0.18@1 m/s/+0.26@3.5) → `~pitch_comp` 1.0→**1.3** (bias→+0.12 m, cmd_vz std 0.058→0.046 improved). **1.55 = measured instability cliff** (pitch std 0.83→8.2°, 32 OSC bursts, HOLD 0% — the pitch↔box↔control loop re-opens): never push past ~1.3–1.4 (margin over optimum). **(7) Kalman re-tune ruled out by measurement** (Rawad asked): flt-alpha d_hat is MORE accurate than raw during the descent (err 0.48 vs 0.64 m) → the transient is control-side, not KF. Noted for the later KF pass: C2 d_hat reads ~+0.45 m far (alpha-smoothing lag), both configs carry ~0.74 m k-calibration bias + ~1.3 m under-read during fast gap-open (alpha~1/d² resolution limit, not a KF knob). **8-seed campaigns** (T3 bench: SPAWN_YAW=90 north-open, one-way straight, START_DIST=8; seeds {42,43,45,46–50}, 44=takeoff dud; new tool `ms_campaign_analyze.py`): campaign-1 healthy 13/16 → dip 5.5–6.9 (no dive), hold C1 5.86±0.10 / C2 5.88±0.07 m, dstd .32/.36, vxstd .12/.15, alt +0.14, HOLD 94–96%, det ≥99.5%, **emerg 0/16**; the ~10 m launch-bounce is systematic (catch-lag, every seed). **launch_stack defaults BAKED — a plain run now IS the tuned controller: VX_MODE=pid (was legacy), KD_VX 1.5, INT_D_MAX 6, INT_BAND 2.5, INT_HOLD_ONLY 1, INT_BLEED 1.0(off), ALPHA_DIST_K 0.096, D_LPF 0.5, A_DEC 2.0, D_HOLD_MIN/MAX 6/7, MIN_DIST 2.5, EMERG_BRAKE_VX 4.0, MAX_VX 8, ALT_FLOOR 11, PITCH_COMP 1.3** (scenario knobs stay env-only; verified byte-equivalent to the winner in a plain-defaults flight). In-band wander 5.5–6.5 m EXPLAINED (dead-band coasts by design; d_hat's +0.5 bias maps [6,7]→true [5.5,6.5], mean dead-on the 6 m target) → **SOFT-CENTERING SEALED (`~band_kp`=0.4, BAKED as launch default):** weak P pull to the band centre applied ONLY inside the band (fills the dead zone with a gentle slope; integrator still carries cruise, Kd still faded). 3-seed A/B vs same-seed campaign-2 baselines (incl. the worst-dip and worst-bounce seeds): dist std 0.30/0.38/0.35→**0.157/0.180/0.162** (wander HALVED, hold ≈5.8±0.17 m) and vx std 0.104/0.164/0.143→**0.060/0.062/0.048** (2–3× SMOOTHER — continuous micro-trim beats drift-then-correct; the feared in-band hunt did NOT return), transients/HOLD%/emerg unchanged. **REVISED PLAN (Rawad, 2026-07-11):** (a) bench campaigns ≠ final results (trajectories may still change); (b) **TRAJECTORY-VERIFICATION pass** — audit T1–T8 commanded-vs-actual paths against the §M9.1 specs before trusting them (T3 lesson: "fast straight" was really a 60 m shuttle whose reversal flew THROUGH the chaser, plus boundary-repulsion artifacts); (c) **per-trajectory control hardening on Config 1** until very good everywhere; (d) **then Config 2 + Kalman improvement** (KF value only measurable on hard trajectories — the R=[25,15,3000] lesson); (e) only then the official C1-vs-C2 matrix. NOT yet committed.
-> - **2026-07-08 — M11 vx-controller overhaul (IBVS v6.31, distance-domain PID + smoothness): oscillation SOLVED, standoff redesigned as a BAND, in active tuning.** The vx law was rebuilt from the sqrt-of-alpha form into a **distance-domain controller** on `~vx_mode=pid` (default `legacy` = byte-for-byte old): `d_hat=sqrt(k/alpha)`, **k=0.096 measured** (alpha·d_true², vs the old 0.0625 fit); verified d_hat ACCURATE vs Gazebo truth (true 8→d̂ 8.3, true 12→12.5). **HOLD is now a BAND [6,8] m (`~d_hold_min/max`), not a point** — INSIDE the band the chaser COASTS at the integrator-matched target speed (no push/stop) which killed the advance-stop lurch (old code zeroed vx in the dead zone); outside it gently corrects; below `~min_dist`=4 m it is a hard safety floor (brake+dodge). **Oscillation root cause = a feedback LOOP the user diagnosed:** fast accel/decel → chaser pitches → camera tips → YOLO box shifts (measured: box vertical jitter 20 px/frame, p90 56; box lags GT by ~24 px horiz) → controller reacts → more accel. **Broken two ways:** (1) EXACT-geometry pitch de-rotation of ey in the CONTROLLER (`~pitch_comp`=1.0; atan reprojection + signed body-pitch → gravity-stable; ey std 0.43→0.15; corrects BOTH accel nose-down AND decel nose-up). NB pitch-in-detection-node FAILS — YOLO GIL starves the pose callback, pitch stays 0. (2) `~max_accel` SLEW-LIMIT (3 m/s², emergency brake bypasses it) → gentle accel → stable camera. Plus `~deriv_lpf`=0.6 EMA on dex/dey/dea (Kd noise: cmd_vz jitter 1.28→0.52), Kd_vx=1.5 damping, and **COAST-THROUGH-MISSES** (`~miss_hold_frames`=25: hold last cmd decayed on YOLO drops so C1 stops stuttering vx→0 on every miss — HOLD 54→96%). **Net measured: OSC events 471→0, vx jitter 0.20→0.15, pitch swing +30→+17°, FOV 100%, HOLD 97-99%.** Gains (sweep cell B, single-run so NOT yet multi-seed-confirmed): Kp_vx 2.5 / Ki_vx 1.2 / Kd_vx 1.5 / d_lpf 0.4. **OPEN/IN-PROGRESS (user-driven, NOT done):** (a) chaser holds ~12 m during the forward sprint instead of the band — CAUSE FOUND: the slew limit throttles the post-reversal catch-up (starts each leg at −4, can't ramp to the 8 the law wants at e_d=+5) → FIX in progress = distance-dependent accel (`~max_accel_fast`=8 when d_hat>band, gentle inside). (b) the T3 180° shuttle reversal flies the target straight THROUGH the chaser → through-pass ~2 m, band+floor physically impossible against it (validated: on slow T2 non-crossing the band controller holds 8.0 m, 0 % below 4 m, smooth — so the DESIGN is correct, the crossing trajectory is the obstacle); `~straight_offset` racetrack was tried but the user wants the target STRAIGHT (world path already straight, 0.05 m rms — the "not straight" look was the racetrack offset, now reverted to 0). (c) **REMARK for later: user still perceives residual oscillation in Config 1 — query whether it's a Kalman/estimation issue (C1 has no Kalman; C2 is far smoother — vx jitter 0.17 vs 2.84).** Emergency brake DECOUPLED from max_vx (`~emerg_brake_vx`=4.5) so raising chase speed doesn't make braking violent; dodge speed `~emerg_vy`=2.0; dodge trigger = close(<min_dist+1.5) AND closing (the early-at-8m attack over-fired 19 s). target_mover v10.9: DAMPED PD altitude hold (was pure-P → 0.7 m altitude WAVE) + `~straight_offset` racetrack (default 0). NEW tools (scripts/, catkin+repo): `sim_snapshot.py` (EVENT-triggered FOV capture — OSC/BRAKE/LOST/NEAR + burst mode, `SNAP=1`; Claude Reads the PNGs to SEE the sim — the tool that cracked the stutter + tree + pitch diagnoses), `score.py`, `collision.py` (target+tree hit detector), `robust_run.sh` (infra-retry wrapper), `vx_tune_sweep.sh`. flight_logger: +`in_fov/fov_az/fov_el` (GT camera-FOV, fx=277, 5° mount), +`gz_dx/dy/dz`, +absolute chaser/target world XYZ. launch_stack: stuck-target watchdog (STUCK_TIMEOUT), `alt_floor` tree guard, many new knobs (VX_MODE/D_HOLD_MIN/MAX/MIN_DIST/A_DEC/MAX_ACCEL/PITCH_COMP/DERIV_LPF/EMERG_VY/EMERG_BRAKE_VX/MAX_VX/STRAIGHT_AZ/MAX/OFFSET). Mission focus: zone 1, seed 42, T3, Config 1 (bench) → Config 2. NOT yet committed; NOT yet multi-seed-confirmed.
-> - **2026-06-30 — Vertical-channel Kp_z + max_vz probe (M10.3): FLAT → SEVENTH/EIGHTH levers ruled out, the ey-axis T6/T7 failure is CONFIRMED detection-limited (not vertical-tracking-limited):** the ey axis owns the T6/T7 losses (AUC 0.98–0.99) and the vertical gain `Kp_z` was the one untested gain on it — swept live on T6+T7/Zone-1, Config 2, seeds {42,43,45}, 200 s, LOSS_TIMEOUT=60, latch OFF, banner verified every run. **Pre-flight inspection:** `Kp_z=3.0/Ki_z=0.04/Kd_z=0.5` and `max_vz=1.5` were hardcoded; `vz=-gain·(Kp_z·ey+Ki_z·∫ey+Kd_z·dey)` then clipped to ±max_vz → both rosparam-ified (`~Kp_z`/`~max_vz`, defaults = current → plain run byte-for-byte baseline), banner extended to log them. **Two pre-checks off the existing baselines (read-only):** **(1) Saturation NOT binding** — pooled HOLD `|cmd_vz|` mean 0.41 / p90 0.72 / p99 1.49, **frac at cap 0.93 %** (T6 **0 %**; T7 only a 0.3–7 % p99 tail) → `Kp_z` has headroom, gain sweep VALID, cell D deferred. **(2) ey near-centre at dropout** — across 125 raw `REAL→NONE` onsets the target sits at mean `|ey|`=**0.19** of the 0.8 frame-edge clip, slope **+0.005/s** (flat), only **7 %** edge-ward ramps → the box vanishes while still well-centred vertically = the pure-detection signature (a centering *lag* would ramp ey to the edge first); forecasts outcome (b). **Sweep A(Kp_z 3.0)/B(4.5,×1.5)/C(6.0,×2.0) × T6/T7 × 3 seeds = 18 runs, all clean (stale 0/fail 0/banner-bad 0):** **T6 FLAT** (HOLD 38.9/38.4/39.8, no seed-consistent gain, vzSat ~0 %) → outcome (b). **T7 does NOT clear the win gate** — the headline +8 pts (19.0→27.8) is **not seed-consistent** (two of three seeds flat-to-*down* at the non-saturating cell B; the lift sits **inside the measured ~8.9 pt T7 noise floor**), and cell C **saturates 11.4 %** (cap binding *induced* by the ×2 gain, baseline was 2.2 %). **Oscillation guard never trips** — ey zero-crossing ≤0.125/s everywhere and *falls* as Kp_z rises (0.125→0.096 on T6) → no ringing regime reached even at ×2, closing the "push harder" door (same shape as the Kp_wz/Kp_y result). **Cell D follow-on (literal outcome-(c) branch, max_vz×1.5=2.25, Kp_z back to baseline, T7×3):** raising the cap **fully relieves saturation** (0 % at 2.25) but HOLD still **not seed-consistent** (19.0→25.6, per-seed Δ [s42 +10.4, s43 +13.7, **s45 −4.1**], Δmean +6.7 inside the noise floor), eyZC 0.110≈baseline. **VERDICT: outcome (b) — the lever is NEITHER Kp_z NOR max_vz; the vertical channel is CLOSED.** The ey-axis ownership of T6/T7 is real but the failing quantity is **mid-range detector recall, not vertical tracking authority** (empirically confirms the near-centre ey-drift pre-check). Aborts stayed 2–3/3 at every cell including D. **No gain change to the file** (no cell cleared the win+oscillation gate). The hard regime (T6/T7-class) is now ruled out across R, Q_vel, standoff/α\*, damping, SEARCH-heading/τ, Kp_wz/Kp_y, **Kp_z, and max_vz** — the control side is exhausted; the residual is the detection-resolution lever (RUNG-2 native camera res / v4.2 retrain, per the 2026-06-22 seals). **Commit = rosparam plumbing only, a verified no-op** (`~Kp_z` default 3.0 / `~max_vz` default 1.5; `KP_Z`/`MAX_VZ` launch knobs; banner extended). Tools (catkin, untracked): `vz_precheck.py`, `vz_sweep.sh`, `vz_sweep_analyze.py`, `vz_cellD.sh`; deliverable `~/fyp/Results/diagnostics/vz_sweep/{M10.3_vz_analysis.txt, sweep.log.summary, cellD.log.summary}`.
-> - **2026-06-22 — RESOLUTION lever MEASURED, not predicted (M10.3 Part A/B/C): the "free imgsz-1280 win / recovers most" forecast in the bullet below is REFUTED — the camera is 640×480 NATIVE so imgsz-1280 is UPSAMPLING, and the real lever is native CAMERA resolution (ladder RUNG 2):** **Part A (read-only, gates everything):** `fpv_cam.sdf` camera sensor = **640×480** (hfov 1.2217 rad/70° in the SDF, but the live `camera_info` publishes fx=277.19 ≈98° — known discrepancy, resolution is unambiguous); `yolo_detection_node.py` passes the full-native frame to YOLO with **no `imgsz` arg → ultralytics default 640**, and **no pre-resize**. So YOLO already consumes the full native sensor — **imgsz-1280 cannot recover real pixels (there are none beyond 640×480); it interpolates.** This flips the prior "free win" framing. **Part B (one capture run, gains untouched, banner Kp_wz=0.90/Kp_y=1.80 verified):** new untracked tools `clean_capture_record.py` + `clean_capture.sh` flew T7/Zone-1/Config-2/seed-42 and saved **2129 UN-annotated in-FOV frames** (pristine pixels — fixes the burned-GT-marker blocker that made the offline recovery count impossible before) + per-frame metadata. Composition re-confirms the split on fresh data: **460 in-frame raw-miss (det_state=LOST) vs 9 gate-withheld (CONFIRMING) ≈ 98 %/2 % raw** (even more raw-dominant than the pooled 91/9); raw-misses sit at **median 29.4 m / 5.9 px**, live-detections at 8.8 m / 15.9 px. **Part C (offline re-inference, `recover_imgsz_test.py`, same model best_v41s.pt, live gate+conf 0.55 mirrored):** recovery of the 460 raw-miss frames — **imgsz640 (=live control) 36 % · imgsz1280 42 % (+6 pts) · 2×2 tiled 46 % (+10 pts)**. The genuine resolution increment over the live-equivalent control is only **+6 pts (1280) / +10 pts (tiling)** — NOT "most." The still-missed population stays at **median ~4.5 px (>30 m) at every setting**; the sub-5 px / >40 m band is **0 % recall** and unrecoverable by any resolution trick because the 640×480 sensor never captured the detail. Fresh recall-vs-px curve (this capture): 100 % ≥11 px (≤11 m), 85 % @7–9 px (~17 m), 49 % @5–7 px (~23 m), **0 % <5 px (>~40 m)**. **Part D — ladder rung = RUNG 2 (raise NATIVE camera resolution), NOT rung 1 (free imgsz):** the +6/+10-pt interpolation/tiling gain is the upsampling ceiling on the current sensor. Tiling's +10 pts is a **lower bound** on what true native-2× (1280×960 SDF) buys, because tiling has no new optics while a native-2× capture doubles real apparent px → maps the 17–23 m shoulder (5–9 px→10–18 px) from ~50–85 % toward ~95 % recall. **Residual after native-2× = the >40 m / <5 px tail (0 % recall now, →<10 px even at 2×): the slice that needs a v4.2 retrain (higher-res training + small/far-target augmentation), or is accepted as beyond useful tracking range.** **Number for Dr. Sammour: imgsz-alone (zero sim change) buys only +6–10 pts → not worth it as the primary fix; the real fix is native sensor resolution (SDF width/height), which a v4.2 retrain only complements at the far tail.** This CORRECTS finding (6) of the bullet below (resolution is neither "free" nor "recovers most"); findings (1)–(5) stand. Tools (catkin, untracked): `clean_capture_record.py`, `clean_capture.sh`, `recover_imgsz_test.py`; deliverable `~/fyp/Results/diagnostics/cap_T7/{frames/*.png, clean_capture_meta.csv}`. No code/gain/trajectory changes; only this CLAUDE.md seal.
-> - **2026-06-22 — FOV-loss mechanism RE-DIAGNOSED (M10.3): the hard-trajectory loss is TRIGGERED by an in-frame small-target DETECTOR-MISS, not FOV-departure — reopens DETECTION as the one untested lever:** a headless GT-overlay recorder (`gt_overlay_record.py`, mp4 + per-frame CSV) + loss-onset classifier (`gt_loss_analyze.py`) run on T3/T6/T7 at **clean Zone 1** (Config 2, seed 42, banner Kp_wz=0.90/Kp_y=1.80, latch OFF; all 3 aborted on the 60 s SEARCH watchdog), plus pooled Zone-1 gt+flight CSVs (seeds {42,43,45}). **Intrinsics bug caught+fixed:** the recorder first fell back to SDF fx=457; forced onto the live `camera_info` **fx=277.19** (the value the canonical gt CSVs use). The shared projector has a clean horizontal axis (u-resid 0.5 px) but a **−42.6 px vertical bias** (≈9° pitch-model error → vertical-edge calls approximate, horizontal solid). **Six offline findings:** **(1) Loss ONSET = in-frame detector-miss** — every first onset has the GT INSIDE the frame near centre at **mid-range 14–17 m, box steady (~10 px), no shrink, no canopy on the LOS** (Zone-1 clearance 69.5 m, every loss <40 m → occlusion stays ruled out, trees ruled out by eye in the mp4s). **(2) Detection envelope (pooled, in-FOV frames):** recall ≥97 % out to **15 m / ≥14 px**; soft shoulder 15–25 m (72–83 %, 7–11 px); **crosses 50 % at ~28 m / ~5–6 px; ~0 % beyond 40 m.** **(3) Gate-vs-raw — CORRECTED:** the in-frame miss is **~91 % raw-YOLO (no candidate at all: det_state=LOST, det_w=0), only ~9 % persistence-gate** (candidate withheld) — *the earlier "~55 % gate / ~44 % raw" estimate used a wrong det_state mapping and is REVISED to 9/91*; the gate is a low-payoff lever, raw model recall is the problem. **(4) Closure NOT speed-limited:** during SEARCH cmd_vx is pinned at **max 4.5 m/s, faster than every target (T3 3.5 / T6 2.0 / T7 3.0)**; APPROACH median 1.13 (headroom unused because unneeded) → **K_far/max_vx is a dead lever**. **(5) SEARCH geometry:** **81 %** of pooled SEARCH frames the target is OUT of frame (already diverged), 19 % in-frame-undetected → recovery-failure is FOV-divergence (the heading-latch τ sweep already proved this dead). **(6) Resolution cost is FREE:** imgsz 1280 = **47 fps**, 2×2 tiling = **27 fps** (RTX 4060) — both above the ~20 fps pipeline budget, so higher-res inference costs nothing operationally; px-doubling maps the 7–14 px miss-shoulder into the ≥14 px = 99 % band → **predicted to recover most 15–30 m raw-misses** (exact recovery count needs a CLEAN-frame re-inference — the recorded mp4s have the GT marker burned onto the target, so a valid count is impossible offline; only the fps cost was measured). **Decision/framing: the "static tuning DONE / six-lever structural ceiling" stands for the CONTROL side, but all six levers (R, Q_vel, standoff/α*, damping, SEARCH-heading/τ, Kp_wz/Kp_y) were controller-side — the DETECTOR was never a lever. The ceiling decomposes into a detection-TRIGGER (mid-range small-target raw recall — tunable via resolution) + an FOV-divergence RECOVERY-failure (the structural part). Highest-payoff next step = a detection-resolution probe (imgsz 1280 / raise native camera res) BEFORE any expensive v4.2 retrain.** Reconciles with — does not overturn — the 2026-06-15 z7 "99.6 % OUT_OF_FOV" finding: that counted the whole dropout population (tail-dominated by the divergent SEARCH = the *consequence*) on a close-range (2.3 m) overshoot run; this is **onset-based** and a **mid-range** loss. Tools (catkin, untracked): `gt_overlay_record.py`, `gt_loss_analyze.py`, `occlusion_record.sh`; deliverables `~/fyp/Results/diagnostics/watch_T{3,6,7}.mp4` + `watch_T{3,6,7}_frames.csv`. No code/gain/trajectory changes; only this CLAUDE.md seal.
-> - **2026-06-20 — Kp_wz × Kp_y angular-tracking gain sweep (M10.3 step 1): FLAT → SIXTH lever ruled out, static tuning DONE:** the one controller param that could have mattered if T7 were *heading*-limited — the yaw-rate + lateral centering gains — was swept live on T7/Zone-5, seeds {42,43,45}, Config 2, 200 s, LOSS_TIMEOUT=60. Coarse OFAT direction-finder: **A** base (Kp_wz 0.9, Kp_y 1.8) · **B** wz↑ (1.5, 1.8, ×1.67) · **C** both↑ (1.5, 2.7). A runner banner-compare bug (`0.9`≠node's `%.2f` `0.90`) re-ran each cell 3× — **harmless (gains correct every run, CSV copied pre-check) and turned into a fixed-gain noise estimate** (bug since fixed). **Three thesis-grade specifics:** **(1) Noise floor as a number — at IDENTICAL gain+seed, T7/Zone-5 HOLD% spreads ~8.9 pts run-to-run** (base s42: **28.1 / 26.0 / 34.8**); every B/C paired Δ (B +2.4/+0.3/+0.7, C +5.0/−0.1/−1.7; cell-means A 18.0, B 19.2, C 19.0) sits *inside* that band → **statistically flat**. This number pre-empts "did you run enough reps?", justifies reporting **T7 as a stress appendix with variance, not a point estimate**, and sets the **minimum rep count for hard (T7-class) trajectories** in the final matrix. **(2) Structural claim scoped to REGIME, not global — the fast-inclined maneuvering regime (T7-class) sits at a structural FOV/closure ceiling, while the tracker holds ~90 % HOLD on T1/T2/T4/T5/T8.** All **27** runs aborted to the watchdog (ended in SEARCH, spans 102–182 s) **regardless of gain, base included** → the failure is **qualitative (target leaves FOV faster than any centering gain can track), not a tunable margin**. Frame as a **measured ceiling on aggressive 3D evasion — a found-and-proved limit, never a tracker defect**. **(3) The oscillation result closes the "push harder" door — B/C yaw zero-crossing came in BELOW base (0.102 / 0.080 vs 0.175 Hz):** the gains had real headroom, reached **no ringing regime even at ×1.67/×1.5**, and still moved nothing → forecloses "you just didn't push the gains hard enough" (the pre-stated over-gain disqualifier was 3-seed-mean ≥ 0.21 Hz = baseline mean+2σ; never approached). **Decision: adopt NO cell; Kp_wz=0.9 / Kp_y=1.8 unchanged in the file.** Saturation incidental (wz cap grazed 2–3 % on one seed in B/C, zero benefit → not the lever, outcome (c) ruled out). **Committed `ea75620` = rosparam plumbing only, a verified no-op** (`~Kp_wz`/`~Kp_y` defaults 0.9/1.8 → plain run byte-for-byte baseline; `KP_WZ`/`KP_Y` launch knobs; `extract_metrics` END-col `hold_yaw_zerocross_hz`). T7 is now a **CHARACTERIZED structural FOV/closure ceiling across SIX independent levers** (R, Q_vel, standoff/α\*, damping, SEARCH-heading/τ, **Kp_wz/Kp_y**). **Static tuning is DONE.** Next (M10.3 item 2) = adaptive-IBVS mechanism — **form OPEN, NOT defaulted to fuzzy; a Rawad+supervisor strategy decision before any code.** Tools (catkin, untracked): `kp_sweep.sh`, `kp_sweep_analyze.py`.
-> - **2026-06-20 — SEARCH velocity-latch (IBVS v6.30): T7 unrecoverable-SEARCH root cause found + characterized as an FOV/closure limit; latch shipped default-OFF as an opt-in evasion aid:** **Root cause** — the "velocity-predicted SEARCH" (v6.22+) always flew BLIND: the Kalman zeroes its velocity state at `max_dropout`=30 frames=**1.5 s** of dropout, but IBVS only enters SEARCH at `detection_timeout`=**3.0 s** after loss and reads `_kf_vx` THEN → it was always 0, so `_search_base_cwz`=0 and `_pred_cx` froze (Stage-2 = blind ±30° sweep around heading 0). This (not damping/R/Q/standoff) is why a lost maneuvering target diverged. **Fix (v6.30, light single-knob):** latch the loss-instant `v0=(_kf_vx,_kf_vy)` from the last tracking frame (while still valid) and scale it by one exponential decay weight **`w(t)=exp(-t/τ)`**, t=time since loss; one knob `~search_tau` (default 1.0 s), one clamp (`SEARCH_STEP_CLAMP_PX`=12 px/tick). SEARCH-ONLY, gated by `~search_latch`; flag-off ≡ byte-for-byte v6.28 (svx=live `_kf_vx`=0 by 1.5 s); HOLD/APPROACH untouched; Config-1 (no `kalman_velocity`) → v0=0 → graceful blind search. **τ sweep {1,2,3,4} (T7+T9 × seeds {42,43,45}, Config 2 Zone 5, paired vs v6.28) — NO win-both value:** **T7 never lifts at ANY τ** (ΔHOLD −1.1…−2.5, Δrecov −22…−39 everywhere) → **confirms T7-Zone5 is FOV/closure-limited, NOT heading-limited** (agrees with the standoff-sweep + FOV-loss findings; a better SEARCH heading cannot fix a problem that isn't about heading). **T9 evasion improves ONLY at τ=1.0** (Δrecov **+52.8**, ΔOOF **−676**, aborts removed on 2/3 seeds); at τ≥2 the stale-heading regression re-opens (Δrecov −14…−39). **Mechanism: the latch helps reactive evasion most when it commits LEAST** (the fuzzy target reverses mid-gap → a long-trusted stale heading is poison). **Decision: flag default-OFF** (`~search_latch`=False in node + `SEARCH_LATCH:-false` in launch_stack) → a plain run = v6.28 baseline, **ablation matrix + T7 gate unaffected**; the time-bound latch is preserved as an **opt-in evasion aid** (`SEARCH_LATCH=true`, τ=1.0 best when enabled). **The T7 maneuvering-target failure is now a CHARACTERIZED structural FOV/closure limit, not a tunable deficiency** (ruled out across R, Q_vel, standoff/α\*, damping, and SEARCH-heading/τ — all five levers). Tools (catkin, untracked): `search_latch_ab_v630.sh`, `search_latch_analyze_v630.py`, `tau_sweep.sh`, `tau_sweep_analyze.py`, `takeoff_probe.sh`. Aside: **seed 44 is a takeoff DUD in Zone 5** (failed the EKF/arming gate 6×, upstream of IBVS) → clean paired seed set for Zone 5 = **{42,43,45}**.
-> - **2026-06-17 — R=[25,15,3000] TESTED AND REJECTED; R stays [6,6,5] (M9.8):** the M9.9 R re-characterization was reverted in code (catkin + repo) back to `R=diag[6,6,5]`; the M9.9 banner/changelog were removed. R=[25,15,3000] was characterized on T1/T4 (static/slow, apparent size ~constant) where heavy alpha smoothing is free; on T7/T9 (fast depth change) the fixed large R_alpha lags true apparent size → worse estimate. Confirmed by HOLD gate + offline same-stream replay (8/10 streams worse on alpha). **Lesson: R_alpha cannot be one fixed value across static+maneuvering regimes.** The f=277 camera-focal comment fixes in `yolo_detection_node.py` are correct and KEPT (unrelated to R). Next knob to evaluate = Q_vel (process noise), the regime-relevant lever for maneuvering targets.
-> - **2026-06-11 — stress trio flown: guard VERIFIED on T4; two new fixes (FP gate v3.3 + max_vx 4.5) NOT yet flown:** **Trio results (z7, seed 42, 300 s, Config 2):** **T4 — HOLD 89.4%, det 99.6%, sep 6.48 m, min_sep 1.59 m, 1 emergency-brake engagement → v6.26 guard VERIFIED** (no 0.4 m-class event). **T3 — HOLD 9.8%, sep grew past 20 m, aborted 57 s: chaser `max_vx` 3.5 == target speed 3.5 → ZERO closure capability (structural).** **T7 — HOLD 11.3%, det 35%, aborted 157 s: during SEARCH YOLO latched a tree-line false positive ("DRONE 27×8") → IBVS chased the phantom, phase left SEARCH (watchdog reset), recovery failed.** Fixes (staged, fly the trio again): **detection node v3.3** — plausibility filter (box w ∈ [3,300] px from the iris's true size 0.52–0.77 m tip-to-tip + f=307; w/h ∈ [0.8,6.0]) + **acquisition persistence** (no accepted det >1 s → LOST; re-acquire needs ≥3 consecutive frames <80 px apart; starts LOST; gated frames publish the NaN no-detection point; params `~persist_frames`/`~persist_max_jump`/`~lost_after`; `/drone_tracking/detector_status` for the viewer's [GATED] tag). *Ablation integrity: the gate decides WHICH detections exist; accepted coordinates pass untouched — identical in raw/kalman.* **IBVS v6.27** — `max_vx` 3.5→**4.5** (`~max_vx`; ~30% speed advantage; PX4 `MPC_XY_VEL_MAX`=12 default, no clip; brake authority rises to −4.5 too; `max_vx_retreat` unchanged pending re-run emerg data). **ATTRIBUTION:** both land before the re-run — T3 improvement attributes to max_vx, T7 recovery to the FP gate (orthogonal mechanisms). Also: viewer **v1.2** (rolling 300-frame rate + conf + [GATED]), random_spawn **v3.2** (zone 7 center → (−45,−130), ≥42 m off the y=−180 edge; spawn yaw → east ±40°, PRE-BASELINE then LOCKED), summary consolidation (old schema → `summary_archive_preEmerg.csv`; `summary_v2.csv` → `summary.csv`), `plot_run.py` QA plots. **Future card (play ONLY if the runtime gate proves insufficient — a model change resets R characterization): "YOLO v4.1 negative-image retrain"** — add the 1,349 empty frames as background negatives + an FP-rate eval cell (false detections per 100 background frames) to the Colab notebook.
-> - **2026-06-11 — ALPHA_EMERGENCY guard (IBVS v6.26) + watchdog protocol; NOT yet flown:** collision forensics on the T2 z5 CSV nailed the P1 root cause: **the brake branch was working but clamped** — `max_vx_retreat=0.50` m/s pinned `cmd_vx` at −0.50 for the entire 6 s drift from 2.1 m → 0.40 m while the 1 m/s target closed (alpha peak 0.353). Kalman largely exonerated (3 collapse-rejection rows; PRED bridging correct). **IBVS v6.26**: emergency brake guard ABOVE the control law — engage at `~alpha_emergency` **0.033** (3.6× the healthy-HOLD alpha ceiling 0.0091 measured across T1/T2; ~2× the HOLD band ceiling 0.0167; 10× below the collision peak; crossed 5.2 s before closest approach in the recorded collision), release below `~alpha_emergency_exit` 0.7×=0.0231 (hysteresis); while engaged `vx=−max_vx` bypassing vel_smooth AND the retreat clamp, vy/vz/wz keep tracking; target lost while engaged → release to normal SEARCH (never brake blind); engaged state on `/drone_tracking/emergency_brake` → **flight_logger `emerg` column** (flag, NOT a phase). *Caveat (recorded honestly): a pure-alpha trigger cannot give ≥1 s margin at a hypothetical 3.5 m/s closure (alpha=0.033 ↔ ≈1.4 m; 1 s at 3.5 m/s needs trigger at ≈4.9 m where alpha≈alpha_star — inside the HOLD band). Real recorded closures near HOLD were ~0.3–0.5 m/s; the guard's −3.5 matches the target's max 3.5, so once engaged separation cannot keep shrinking.* **extract_metrics** +4 END-appended columns: `emergency_brake_pct`, `emergency_brake_count`, `aborted`, `mission_duration_s` (logged sim-time span) → new schema rows divert to `summary_v2.csv` (B-series mechanism). **Watchdog protocol**: first-acquisition grace (SEARCH counts toward abort only after first APPROACH/HOLD); **tuning runs LOSS_TIMEOUT=10, official `--matrix` batches export 60** (10 s censors the recovery metric + biases against Config 1; a 60 s abort is a recorded outcome); mission end prints "Xs wall / Ys sim" (RTF-drop visibility). Validation = Rawad's stress trio T3/T4/T7.
-> - **2026-06-11 — flight session 2: spawn 8–12 m LOCKED; 10 s loss watchdog; NEW P1 = chaser-target collision:** sequencing gates + `takeoff_both` v10.0 **VERIFIED in flight (3/3 clean launches**, EKF gate released at sim ~37 s each time, zero PX4 deaths; watchdog **abort path NOT yet exercised**). Old 3–6 m spawn caused instant FOV loss + 59 s SEARCH the moment the mover started (smoke run, det 36%) → `random_spawn_target.py` **v3.1**: spawn separation **8–12 m — LOCKED PROTOCOL PARAMETER** (see §13; changing it = mandatory baseline reset). `launch_stack.sh` gained a **loss watchdog**: IBVS phase = SEARCH for `LOSS_TIMEOUT` (default **10 s**) consecutive seconds → abort run, still save CSV + analysis (tagged "RUN ABORTED") + metrics row, batch continues; new env knobs `START_DIST`, `LOSS_TIMEOUT`. Tuning results (NOT official baselines): **T1 z7 static 300 s — HOLD 88.5%, det 99.6%, sep 3.98 m, alt err −0.02 m**; **T2 z5 slow (stopped at 180 s) — HOLD 97.7% of mission, det ~99%, sep 4.81 m, alt err +0.18 m**. Findings: altitude bias is **target-motion-dependent** (−0.02 m static → +0.18 m at 1 m/s); HOLD separation **drifts with target speed** (pursuit lag — λ-scheduler territory); **v8s live in-pipeline fps ≈ 19–20** (same as v3 — record for the n-vs-s table); **RTF = 1.00** → 300 s sim ≈ 5 min wall → full matrix ≈ 16 h. **NEW P1 — chaser-target collision** observed in flight (no safety floor in IBVS; see §12): next task = **ALPHA_EMERGENCY brake guard → stress trio T3/T4/T7** → resume pipeline (§10).
-> - **2026-06-11 — sequencing fix (wall-vs-SIM time race; "weird chaser" crash):** a 300 s run crashed on the pad: chaser `ARM → FAIL` ×10 at **sim 8 s** (EKF not re-aligned after the T2 zone teleport — a ~200 m jump at sim 0–1 during initial alignment), takeoff_both gave up after 10 attempts and **abandoned the already-armed target** with no setpoint stream → it tipped over (the "acting weird" screenshot). Root issue: stages were gated by **wall-clock sleeps**, but PX4 readiness is a **SIM-time** property and sim time freezes during the lockstep window (T2 target spawn → T5 attach) — so some runs armed at sim 24 s+ (fine) and others at sim 8 s (crash). Fixes: `launch_stack.sh` gained **readiness gates** — `wait_fcu` (MAVROS `connected: True`) after T1 (before the teleport — topic existence fires ~30 s early, mid world-load) and after T6 (heartbeats imply instance 1 attached + rcS done = freeze over), plus **`wait_sim_time 25` before T10** (EKF settle floor). `takeoff_both.py` → **v10.0**: ARM_ATTEMPTS 10→40 (~20 s sim, outlasts EKF alignment) + **disarm-on-abort** (never leave one drone armed). Static checks only — NOT yet smoke-tested (Rawad runs Gazebo next session).
-> - **2026-06-11 — infrastructure VERIFIED (post pxh-EOF fix):** smoke test PASSED (Config 2, T4, zone 7, seed 42, 120 s: HOLD 77.9%, det 99.87%, takeoff_ready OK in 1 s, zero deaths). `run_config.sh` batch validated **2/2** (seeds 42/43); same-seed repeat near-identical (HOLD 77.86 vs 78.06, n=1554 both) → paired-comparison basis confirmed. **YOLOv8s live fps measured: ~19–20 on CUDA** (closes the step-2 fps item; n-vs-s table still pending v8n live number). New `sync_results.sh` mirrors `~/fyp/Results` → `C:\Users\fakhe\OneDrive\Desktop\FYP\Results` (auto-runs at end of every `run_config.sh` batch; results stay on ext4 during runs — /mnt/c is slow and OneDrive locks files). `yolo_debug_viewer.py` → **v1.1** (stale-box cleared after 0.5 s + NO DETECTION banner; was: frozen box forever + inflated rate) and now auto-launched by `launch_stack.sh` as stage **TV** (`VIEWER=0` to disable for unattended batches). **Standard run duration = 300 s** (the built-in default; the 120 s runs were smoke-test overrides only). Parallel sims ruled out (single Gazebo world, fixed ports 4560/4561, one GPU) — sequential batches via `run_config.sh` are the design.
-> - **2026-06-10 — pxh-EOF fix (REAL cause of chaser-PX4 death):** the recurring "chaser PX4 dies → Gazebo closes / T10 takeoff_ready TIMEOUT" was the chaser's **interactive pxh shell reading EOF on stdin**. `launch_stack.sh` backgrounds roslaunch (`&` → stdin=/dev/null); `posix_sitl.launch` defaults `interactive:=true`, so pxh starts the instant rcS completes (= when baylands finishes loading, ~30 s in) and exits px4 cleanly (`pxh> Exiting NOW.`); `sitl` is `required="true"` → roslaunch kills master+Gazebo → all later nodes die (`Failed to initialize time` / `Connection refused`). Death lands "at T5/T10" only because that's when world load finishes — both the B2 theory AND the T5 working-dir theory misattributed it (the T5 multi-instance form is still correct and kept; verified standalone it blocks properly on TCP 4561). **Fix: `interactive:=false` on the T1 roslaunch** (px4 runs with `-d`, no pxh). Target PX4's "rcS return value: 2" in that run = SIGINT(2) from cleanup, not a startup failure.
-> - **2026-06-10 — T5 dual-SITL fix:** target PX4 (instance 1) now launches via PX4's own multi-instance Classic form (per-instance working dir + `-w sitl_iris_1` + rootfs `<build>/etc`), fixing the **chaser-PX4 death** that closed the Gazebo window at T5/T10. The earlier **B2 "fix" was wrong**: `PX4_SIMULATOR=gazebo` is a NO-OP in v1.13.3 (never read by `rcS`; starts no 2nd gzserver). True regression = missing working-dir isolation destabilising lockstep on the shared Gazebo. M7.3 "verified command" block corrected; B2 row marked SUPERSEDED.
-> - **2026-06-10 — M9.6 step 2:** YOLOv8s deployed (`best.pt` = best_v4s.pt, 11.14M params, 28.6 GFLOPs; v4n kept as `best_v4n.pt` rollback). Detection node → **v3.2** (`~device`/`~conf` rosparams + rolling-fps log; detection logic unchanged). CUDA available (RTX 4060, torch 2.4.1+cu121). Results restructured to **`~/fyp/Results/Config{1-4}/`** (`launch_stack`/`run_config`/`extract_metrics` repointed; old `~/results` never materialized → nothing to archive).
-> - **2026-06-10 — M9.6:** fuzzy adaptive IBVS locked (Mamdani λ-scheduling, no RL), YOLOv8m dropped (n-vs-s only), PPO/Config 3/Config 4 parked pending supervisor. Bugs B1–B10 **FIXED in Phase B**; target_mover bumped to **v10.6** (B1 + SPRINT MF rescaled to fit universe [1.0,3.5]); Kalman strings unified to M9.8. CLAUDE.md corrected against master (code = source of truth).
-
 ---
 
-## 1. Project Summary
+## 1. Project Overview
 
-A fully autonomous **chaser drone** that detects, tracks, and follows a **target drone** using computer vision and AI, evaluated entirely in simulation with statistical validation results as the measure of success.
+Autonomous chaser drone detects, tracks, and follows a target drone using YOLOv8 + IBVS control. Evaluated in Gazebo/PX4 SITL simulation. Three configs: C1 (YOLO+IBVS), C2 (YOLO+KF+IBVS), C3 (YOLO+RL — in progress).
 
-**One-sentence architecture (deployed Configs 1–2):**
-> FPV Camera → YOLOv8 (detection) → [Kalman Filter — Config 2 only] → IBVS controller (pixel-error → **body-frame velocity setpoint** on `/mavros/setpoint_raw/local`) → PX4/MAVROS → drone moves
+**C1/C2 FINAL BASELINE (sealed, committed `3d863be` + `699bedb`):**
+- `alpha_dist_k=0.077` (calibrated: measured α·d²=0.077 vs GT; old 0.096 over-read 13%)
+- `d_lpf=0.5` UNIFORM across all trajectories
+- Standoff **[6,7] m UNIFORM** on ALL trajectories (no per-traj [9,11] anymore)
+- `traj_track_kp=1.0` — target path-lock (fixes open-loop target drift; T1 4m→0.26m, T4 radius clean)
+- **Option B** (`INCLINE_NO_HREVERSE=1`) for T6/T7 — forward + vertical zigzag, NO horizontal reverse
+- **Vertical package** for T6/T7/T8: `KP_Z=6 / MAX_VZ=2.5 / MAX_ACCEL_VZ=6 / KI_Z=2.0 / INT_Z_MAX=1.3 / INT_Z_BLEED=0.70 / CHASER_ZDN=2.5`
+- `SPAWN_YAW=96` for T2/T3
 
-**Planned full pipeline (Config 3, PARKED):** insert PPO outer loop (α*, λ) between Kalman and IBVS.
+**C1/C2 RESULTS** (128 runs: T1–T8 × 8 seeds {42,43,45–50} × C1/C2, zone 1, 200 s):
+- Custody: 100% T1–T6/T8; 98.9% T7 (both configs)
+- HOLD: 94–98% except T3 cosmetic bimodality (T3 hold gate fixed to use pitch-comp ey_c)
+- **THE C1-vs-C2 finding:** yaw-jerk C2 **1.6–3.3× smoother on ALL 8 trajectories**, every p<0.01 — the KF's contribution is smoothness, not tracking accuracy
+- Safety: 3 sub-2m passes in 128 runs, all C1, all guarded corner passes; C2 worst 2.33m
 
-**Architectural family:** Hierarchical "DRL-tunes-IBVS" paradigm. PPO is the strategic outer loop; IBVS is the tactical inner loop. Established by Sampedro et al. (IROS 2018), refined by Jin et al. (IEEE TIE 2022), Hu et al. (2022), and Wu/Fu et al. (Drones MDPI 2023). **M9.6 decision:** the outer-loop λ adaptation is implemented as **Mamdani fuzzy gain scheduling** (no RL) for the deployed ablation; PPO is parked.
+**ADDITIVE RULE FOR RL:** Zero edits to `ibvs_controller_node.py`, `kalman_filter_node.py`, or `target_mover.py`. All RL code is new files only.
 
 ---
 
@@ -57,453 +37,223 @@ A fully autonomous **chaser drone** that detects, tracks, and follows a **target
 | Autopilot | PX4 v1.13.3 SITL |
 | Bridge | MAVROS |
 | Python | 3.8 |
-| RL framework | Stable-Baselines3 (SB3) v2.4.1 (PPO parked) |
+| RL framework | Stable-Baselines3 (SB3) v2.4.1 |
 | Deep Learning | PyTorch |
-| Detection | Ultralytics YOLOv8 |
-| Kalman | hand-rolled 6-state KF (numpy, not filterpy) |
+| Detection | Ultralytics YOLOv8 (YOLOv8s, best_v41s.pt) |
+| Kalman | hand-rolled 6-state KF (numpy) |
 | Hardware | i5-13420H, 16GB RAM, RTX 4060 8GB |
 
 **Key Paths:**
-- ROS package scripts (live, run from here): `~/catkin_ws/src/drone_tracking/scripts/`
+- Live scripts (run from here): `~/catkin_ws/src/drone_tracking/scripts/`
 - Git repo (push from here ONLY): `~/Fyp_Drone_Detection_Tracking/drone_tracking/scripts/`
-- PX4 autopilot: `~/PX4-Autopilot/`
-- Models (YOLO + PPO weights): `~/drone_detection/models/`
-- Active YOLO model: `~/drone_detection/models/best.pt` (**= best_v4s.pt / YOLOv8s, deployed M9.6 step 2**; rollback kept as `best_v4n.pt`; path hardcoded in `yolo_detection_node.py`, device selectable via `~device` rosparam)
-- PPO weights: `~/drone_detection/models/ppo_policy_weights_v5.pth` (parked)
-- Flight log (latest run): `~/flight_log_latest.csv`
-- **Results layout (SPLIT 2026-07-12):** raw working results = `~/fyp/Results/` (ext4, written during runs: `summary.csv` + `Config{1,2,3,4}/traj{T}_zone{Z}_{TS}.csv` + `.analysis.txt` + `screenshots/` + `diagnostics/`) → mirrors to OneDrive **`FYP/Results_raw`** (batch-end sync, screenshots/diagnostics excluded). **Curated REFERENCE results = `~/fyp/Results_reference/`** (hand-picked runs under meaningful names + `README.md` + `00_Summary/RESULTS_SUMMARY.md` + `all_runs_metrics.csv`) → syncs (with `--delete`) to OneDrive **`FYP/Results`** — THE reference folder for Dr. Sammour; batches can never pollute it. New reference-worthy results: add to `~/fyp/Results_reference` + update its README/RESULTS_SUMMARY, then run `sync_results.sh`. Old pre-hardening OneDrive folder archived complete as `FYP/Results_archive_pre-v8_2026-07-12.zip`. Results stay **OUTSIDE** the git repo.
+- PX4: `~/PX4-Autopilot/`
+- YOLO model: `~/drone_detection/models/best.pt` (= best_v41s.pt / YOLOv8s)
+- RL artifacts (outside repo): `~/fyp/rl/` — models, logs, datasets
+- Results (raw): `~/fyp/Results/` → OneDrive `FYP/Results_raw`
+- Results (curated reference): `~/fyp/Results_reference/` → OneDrive `FYP/Results`
+- **Original/archived code: `~/fyp/original/`** — early .bak files, pre-RL baseline, nolockstep SDF files
 
-**GitHub:**
-- Repo: `rawad-fakhreddine/Fyp_Drone_Detection_Tracking` (branch: master)
-- Raw file access: `https://raw.githubusercontent.com/rawad-fakhreddine/Fyp_Drone_Detection_Tracking/master/drone_tracking/scripts/[filename]`
-- **CRITICAL:** Always push from `~/Fyp_Drone_Detection_Tracking/` only. Never `git init` inside `catkin_ws/`.
+**GitHub:** `rawad-fakhreddine/Fyp_Drone_Detection_Tracking` (branch: master)
+**CRITICAL:** Always push from `~/Fyp_Drone_Detection_Tracking/` only. Never `git init` inside `catkin_ws/`.
 
 ---
 
-## 3. Milestone History (M1–M8)
+## 3. Architecture
 
-### M1 — Literature Review
-- Surveyed perception, detection, dataset generation for drone-to-drone tracking.
-- Concluded: Gazebo + PX4 SITL preferred over AirSim for ROS control-algorithm work; YOLOv8 with synthetic data is current standard.
-- Key papers locked: Sampedro 2018 (DRL+IBVS founding), Tuncer & Alpdemir 2023 (closest PPO drone-to-drone precedent), Pereira 2021 (IBVS vs PBVS monocular justification).
+**C1:** `FPV Camera → YOLOv8 → IBVS → PX4`
+**C2:** `FPV Camera → YOLOv8 → Kalman Filter → IBVS → PX4`
+**C3 (RL, in progress):** `FPV Camera → YOLOv8 (frozen) → RL policy → body-velocity → PX4`
 
-### M2 — YOLO Training v1
-- Dataset: 5 merged Roboflow datasets; `classes.txt` contamination fixed with `sed`.
-- YOLOv8s fine-tuned on Colab: mAP50=0.979, Precision=0.994, Recall=0.940.
-- Lesson: `labelImg classes.txt` contamination bug — verify/lock before labeling.
+IBVS output: `/mavros/setpoint_raw/local` (PositionTarget, FRAME_BODY_NED: vx, vy, vz, yaw_rate).
+State machine: TAKEOFF → SEARCH → APPROACH → HOLD ↔ (stale/lost) → SEARCH.
 
-### M3 — Kalman Filter
-- `kalman_filter_node.py`: subscribes to `/drone_tracking/target_center`, publishes `/drone_tracking/filtered_target`.
-- Bridges YOLO dropouts up to 10 missed frames with prediction.
-- Close-range collapse rejection: pixel jump > 100px AND alpha drops from > 3000 to < 900 in two frames → reject.
+**Configs:**
+| Config | Pipeline | Status |
+|---|---|---|
+| 1 | YOLO + IBVS | **Active — C1/C2 SEALED BASELINE** |
+| 2 | YOLO + KF + IBVS | **Active — C1/C2 SEALED BASELINE** |
+| 3 | YOLO + RL policy | **In progress** (supervisor directive 2026-08-11) |
 
-### M4 — Single PX4 SITL Setup
-- Gazebo Classic 11 + PX4 v1.13.3 SITL + MAVROS on ROS Noetic.
-- World: `baylands.world`. Drone model: `iris_fpv_cam`.
-- OFFBOARD mode: must pre-stream setpoints before arming (WSL2 clock jitter causes auto-disarm).
-
-### M5 — IBVS Controller (up to v6.15)
-- Control law: pixel error `e = [ex, ey]` → body-frame velocity setpoint (PD/PID per axis, not the textbook `-λ·Le⁺·e` form — see §Control Chain).
-- Why IBVS over PBVS: YOLO gives only pixel bounding boxes — no depth. IBVS is calibration-tolerant and keeps target in FOV by construction (Pereira 2021).
-- Known failure modes addressed: fixed gain λ (planned: fuzzy scheduler), FOV loss at high gain, close-range oscillation (α* clamping + Kalman rejection).
-
-### M6 — PPO Agent (v4.5) — **PARKED at M9.6**
-- Architecture: small MLP policy (SB3 PPO), action space: [α*, λ].
-- Observation space: [ex, ey, α] normalized (divide α by 0.06).
-- Reward: pure positive similarity reward.
-- Export: PyTorch `.pth` state_dict only (never full SB3 `.zip`).
-- **M9.6 status: PARKED** pending supervisor decision on Config 3 redesign. The deployed λ adaptation is fuzzy, not RL.
-
-### M7 — Dual PX4 SITL Architecture
-- **M7.1:** Target drone spawned in Gazebo.
-- **M7.2:** IBVS v6.15 finalized with reliable 50s+ HOLD phases.
-- **M7.3:** Full dual PX4 SITL — chaser (instance 0, MAV_SYS_ID=1, `/mavros/*`) + target (instance 1, MAV_SYS_ID=2, `/target/mavros/*`).
-- **Verified target PX4 launch command (Gazebo Classic, instance 1 attaching to the EXISTING Gazebo from T1 — CORRECTED 2026-06-10 "T5 fix"):**
-  ```bash
-  # From PX4's own Tools/gazebo_sitl_multiple_run.sh (~L37). The per-instance
-  # working dir (-w) is REQUIRED — without it lockstep on the single shared
-  # Gazebo destabilises and the CHASER PX4 dies (taking Gazebo down with it).
-  PX4_BUILD=~/PX4-Autopilot/build/px4_sitl_default
-  mkdir -p "$PX4_BUILD/instance_1"
-  (cd "$PX4_BUILD/instance_1" && PX4_SIM_MODEL=iris \
-     "$PX4_BUILD/bin/px4" -i 1 -d "$PX4_BUILD/etc" -w sitl_iris_1 -s etc/init.d-posix/rcS)
-  ```
-  - **Do NOT** set `PX4_SIMULATOR=gazebo` — it is a **NO-OP** in v1.13.3 (referenced nowhere in `rcS`/`px4-rc.simulator`; does **not** start a 2nd gzserver). **Do NOT** set `PX4_GZ_MODEL_NAME` (gz-sim/Garden, ignored in Classic). `-i 1` → simulator TCP port **4561**, matching the target SDF `mavlink_tcp_port=4561`. `PX4_SIM_MODEL=iris` → airframe **`10016_iris`** (the only iris airframe in this build; legacy `4001` no longer exists). The target **model** is spawned separately by **T2** (`random_spawn_target.py` → `gazebo_ros spawn_model`), so T5 launches ONLY the firmware.
-- Dual-SITL gotchas: MAV_SYS_ID mismatch silently breaks target MAVROS; target spawn height < 0.5m causes physics glitch; world-frame velocity required for the target (FRAME_LOCAL_NED for `/target/mavros/setpoint_raw/local`).
-
-### M8 — PPO v5 Retraining — **PARKED at M9.6**
-- Retrained PPO to v5.2 with dual-SITL environment. Result: near-constant output (α*≈0.011, λ≈0.50).
-- Root cause: domain gap between offline training distribution and live Gazebo.
-- **M9.6 status: PARKED.** Documented as a valid ablation finding; v6 retraining not pursued in current plan.
+**Ablation integrity:** C1 and C2 use IDENTICAL IBVS; the ONLY difference is the Kalman filter. C1 stays `detection_source=raw` with NO filtering.
 
 ---
 
-## 4. Milestone 9 — Evaluation & Optimization Phase
+## 4. RL Milestone — Config 3 Design (LOCKED)
 
-### M9.1 — Evaluation Framework Design & target_mover v9.0
-- Locked the 9-trajectory benchmark (T1–T9) and the configuration ablation.
-- `target_mover.py` gained `~trajectory` rosparam (1–9). T1–T8 deterministic parametric; T9 = FuzzyEscaper.
-- Removed stray `.git` inside `scripts/`. Rule: always push from `~/Fyp_Drone_Detection_Tracking/` only.
+**Scope:** RL replaces the CONTROL block only. YOLO perception stays frozen. C1/C2 are the baseline RL must beat on the same 8-traj / 8-seed matrix. SEARCH stays as-is (shared by all 3 configs — RL is scoped to the TRACKING regime).
 
-**9 Benchmark Trajectories:**
+**OBSERVATION** (16 scalars + frame-stack N=4):
+`[ex, ey_c, d̂, ėx, ėy, ḋ, w, h, conf, t_since_det, pitch, roll, a_(t-1)]`
+- `ey_c` = pitch-compensated vertical error (same math as IBVS :597)
+- Frame-stack provides rate information AND temporal context; raise N if lag observed; LSTM fallback
+- Dropout handling: FREEZE last obs + conf=0 flag
+
+**Normalization table** (locked in RL_Milestone_Design.docx §7):
+- ex/ey_c: ÷0.8 (frame half-width); d̂: ÷10; ėx/ėy: ÷0.5; ḋ: ÷3; w/h: ÷640/480; conf: as-is [0,1]; t_since_det: ÷3; pitch/roll: ÷30°; a_(t-1): ÷caps
+
+**ACTION:** Continuous `[vx, vy, vz, wz]`, tanh → velocity caps `[8, 1.2, 2.5, 0.5]` m/s or rad/s.
+No external safety filter. Safety is LEARNED via reward shaping.
+
+**REWARD:**
+- Gaussian centering: `exp(-(ex²+ey_c²)/(2σ²))` + alive bonus (kills suicidal-agent trap)
+- Band penalty: penalize `|d̂ - d_star|` outside [6,7] m band
+- Smoothness penalty: `‖a_t - a_{t-1}‖`
+- `P_lost`: large penalty for sustained loss (largest term — closes suicide door)
+- `P_safe`: penalty for d̂ < safety threshold
+- GT legal for reward (training only); observation must not use GT
+
+**EPISODES:**
+- Option A (locked): fixed 30–40 s OR terminal collision (−50) OR sustained loss >3 s (−100)
+- Timeout = truncation (not failure)
+
+**ALGORITHM:** SAC primary (sample efficiency = binding constraint at ~1× RTF) + PPO baseline; TD3 optional. **Privileged critic** used (critic sees GT during training; actor sees only obs → no domain gap at test).
+
+**BC WARM-START (done):**
+- 158,727 tracking-regime pairs from 52 calibrated C1 runs (from existing flight_logger v2 logs)
+- w/h/conf filled from α + aspect (teacher IBVS never uses them)
+- BC v1 trained: held-out RMSE vx 0.066 / vy 0.024 / vz 0.053 m/s / wz 0.003 rad/s ≈ teacher noise floor
+- 58 s on RTX 4060; model: `~/fyp/rl/models/bc_policy_v1.pth` (SB3 SAC actor dims for weight surgery)
+
+---
+
+## 5. RL Implementation Files
+
+All in `~/catkin_ws/src/drone_tracking/scripts/` (and repo mirror). ADDITIVE — zero edits to C1/C2 code.
+
+| File | Status | Purpose |
+|---|---|---|
+| `rl_env.py` | In progress | ObsBuilder from live ROS topics; pitch-comp ey; probe/record modes read-only; gym stub |
+| `rl_bc_dataset.py` | Done | Extracts BC pairs from flight logs; fills w/h/conf from α+aspect |
+| `rl_train_bc.py` | Done (BC v1 trained) | Behaviour cloning to warm-start SAC actor |
+| `rl_train_sac.py` | Skeleton (blocked on env reset) | Online SAC training loop |
+| `rl_eval_sac.py` | Done | Frozen policy evaluation harness (logs like a flight CSV) |
+| `rl_test_episodes.py` | Done | Episode rollout tester |
+
+**RL Training Setup:**
+- World: `rl_empty.world` (flat, no trees, faster physics)
+- SDF models: `iris_chaser_nolockstep/iris.sdf` + `target_iris_sitl_nolockstep/iris.sdf` (enable_lockstep=false)
+- Training target: T4 orbital (contained moving target — one-way T2/T3 fly off-island → STUCK abort)
+- Run command: `WORLD=rl_empty HEADLESS=1 VIEWER=0 NO_LOCKSTEP=1 SPEED_FACTOR=4 bash launch_stack.sh`
+
+**4× Speedup (nolockstep) — Current Status:**
+- Lockstep is always 1× RTF on WSL2 (PX4's HIL response ~4ms gates each step — can't speed up)
+- Nolockstep target: `real_time_factor=4` in world + `PX4_SIM_SPEED_FACTOR=4` → 4 sim-s/wall-s
+- **BLOCKING BUG (TIMESYNC):** Gazebo ROS API plugin forces `/use_sim_time=true` in its `Load()` regardless of launch file args. MAVROS uses sim_time (starts at 0); PX4 nolockstep uses wall_time (~1.787×10⁹s) → setpoints appear 56 years stale → rejected → OFFBOARD drops after ARM.
+- **Fix (designed, not yet applied):** Split T1 launch: (1) `posix_sitl.launch` (Gazebo+PX4 only), (2) `wait_topic /clock`, (3) `rosparam set /use_sim_time false`, (4) launch MAVROS separately via `mavros px4.launch fcu_url:=udp://:14540@localhost:14557`
+- World file (`rl_empty.world`) already set: `real_time_factor=4, real_time_update_rate=250, max_step_size=0.004` ✓
+- PX4_SIM_SPEED_FACTOR only exported for NO_LOCKSTEP=1 (in lockstep it causes EKF fault → crash)
+
+---
+
+## 6. Benchmark Trajectories
 
 | ID | Name | Parameters | Purpose |
 |---|---|---|---|
 | T1 | Static Hover | Stationary | Baseline HOLD stability |
-| T2 | Slow Straight | 1.0 m/s | Low-speed following |
-| T3 | Fast Straight | 3.5 m/s | High-speed following |
-| T4 | Circular Orbit | R=8m, T=25s | Lateral tracking |
+| T2 | Slow Straight | 1.0 m/s, one-way, SPAWN_YAW=96 | Low-speed following |
+| T3 | Fast Straight | 3.5 m/s, one-way, SPAWN_YAW=96 | High-speed following |
+| T4 | Circular Orbit | R=8m, T=25s | Lateral tracking; **RL training target** |
 | T5 | Lemniscate | a=8m, T=40s | Direction-change tracking |
-| T6 | Inclined Medium | 15°, 2.0 m/s, random azimuth | 3D maneuvering |
-| T7 | Inclined Hard | 35°, 3.0 m/s, random azimuth | **3D hard — deterministic VALIDATION GATE** |
-| T8 | Up-Down Helix | R=8m, T=25s, continuous ascent+descent | Altitude + lateral combined |
-| T9 | Active Evasion (fuzzy) | 7-axis Mamdani evasion | **Stress test only — reactive, never an accept criterion** |
+| T6 | Inclined Medium | 15°, 2.0 m/s, Option B | 3D maneuvering |
+| T7 | Inclined Hard | 35°, 3.0 m/s, Option B | 3D hard — validation gate |
+| T8 | Up-Down Helix | R=8m, T=25s, continuous bounce | Altitude + lateral |
+| T9 | Active Evasion | 7-axis Mamdani fuzzy | Stress test only — never accept criterion |
 
-### M9.2 — Fuzzy Evasion Model Development (target_mover v9.x)
-- Iterative redesign of the Mamdani fuzzy evasion (target_mover) addressing circular orbiting, altitude/heading conflicts, conservative speeds, boundary-repulsion override.
-
-### M9.3 — Component Tuning Round 1
-- `random_spawn_target.py` v2.0→v3.0: GPS-surveyed zones; ablation whitelist {5,6,7,9}.
-- `flight_logger.py` + `analyze_flight_log.py` gained `world_alt_err` column.
-- IBVS v6.19→v6.20 (K_far 30→35, directional SEARCH memory); target_mover v9.8→v10.2.
-
-### M9.4 — Component Tuning Round 2 (major session)
-- **Kalman M9.6→M9.7→M9.8:** Q_pos→0.5, Q_vel→6.0, PIXEL_JUMP→180, MAX_REJ→4.
-- **IBVS v6.21→v6.25:** v6.24 **breakthrough — ea HOLD threshold 0.005→0.010** (HOLD 0%→98%). v6.22 rebuilt SEARCH as the **2-stage velocity-predicted** design that is still deployed.
-  `<!-- VERIFY: old CLAUDE.md claimed "v6.25 = Stage 3 / 360° at 5s". NOT in code. Deployed SEARCH is 2-stage (Stage 1 0–3s velocity-predicted, Stage 2 3s+ ±30° sweep). The file is titled v6.25 but its changelog stops at v6.22. -->`
-- **target_mover v10.3→v10.5:** 7-axis Mamdani evasion, EDGE→FAST, speed/MF rescaling.
-- **YOLO v4 dataset pipeline:** auto-label → relabel empties → pHash dedup (~44% removed) → v3-mix assembly.
-- Best run hit HOLD 98%, but HOLD% ranged 26–98% across runs — **inconsistency is the primary bottleneck** (P1 at the time; now P2 — see §12).
-
-### M9.5 — Batch Runner Infrastructure + YOLO v4 Training
-- `yolo_detection_node.py` publishes `/drone_tracking/target_box` (real cx,cy,w,h).
-- `ibvs_controller_node.py` gained `~detection_source` (raw|kalman); `~use_ppo` confirmed rosparam.
-- `target_mover.py` + `random_spawn_target.py` gained `~seed`.
-- `extract_metrics.py` created (appends one row to `~/results/summary.csv`).
-- `cleanup.sh` done + tested. **`launch_stack.sh` / `run_config.sh` were created (exist on master) but untested and buggy — see Known Bugs.**
-- YOLO v4 training (Colab, from COCO weights, epochs=80, seed=42): **v8n done** (mAP50=0.991, mAP50-95=0.848, P=0.971, R=0.979, 75 FPS on T4). v8s interrupted at epoch 34. v8m not started.
-
-### M9.6 — Strategy Lock + Infrastructure Bug Fixes (current session)
-**Locked decisions (the spine of the remaining work):**
-- **Adaptive IBVS = Mamdani fuzzy gain scheduling** (reuse FuzzyEscaper pattern from `target_mover.py`; cite Fu et al., Drones MDPI 2023). Formula-based scheduling = documented fallback. Replaces the fixed `0.70` λ-fallback. See §Adaptive IBVS.
-- **Deployed YOLO going forward = YOLOv8s** (supervisor decision). v8m DROPPED — comparison is n-vs-s only. v8s must be deployed *before* any noise (R) measurement (R is model-dependent).
-- **PPO, Config 3 redesign, Config 4 = PARKED** pending supervisor.
-- **Universal validation gate:** 2×T7 (seeds {42,43}) pass/fail gate + 2×T9 (seeds {42,43}) stress test, 10 Hz logging. Seeds are fixed and reused forever → paired comparison (identical target path per seed on deterministic trajectories). T7 is deterministic (differences attributable to the change); T9 is reactive (robustness evidence only, never the accept criterion).
-- **Bugs B1–B10 identified and fixed in Phase B** (see Known Bugs section).
+Seeds: {42, 43, 45–50}. Zone: 1. Duration: 200 s (C1/C2 matrix) / 150 s (deliverable).
 
 ---
 
-## 5. Ablation Study (revised at M9.6)
+## 7. Component Versions (Final C1/C2 Baseline)
 
-**Primary evaluation matrix (deployed):** T1–T8 × zones {5,6,7,9} × **Configs 1–2**, ≥3 seeded repeats, paired significance test. T9 reported separately as stress test.
+| Component | File | Key params / notes |
+|---|---|---|
+| YOLO model | `best_v41s.pt` (= best.pt) | YOLOv8s; mAP50=0.991; ~1200 background negatives; v4n = rollback |
+| Detection node | `yolo_detection_node.py` v3.3 | FP gate: w∈[3,300]px, w/h∈[0.8,6.0]; acquisition persistence 3 frames; publishes target_center + target_box + detector_status |
+| Kalman filter | `kalman_filter_node.py` M9.8 | R=diag[6,6,5], Q=diag[0.5,0.5,3,6,6,3], PIXEL_JUMP=180px, MAX_REJ=4, damp=0.88 |
+| IBVS controller | `ibvs_controller_node.py` | K_far=35, K_near=6, alpha_star=0.0067, ea_HOLD=0.010, max_vx=8, alpha_dist_k=0.077, d_lpf=0.5, KD_VX=1.5, INT_D_MAX=6, INT_BAND=2.5, INT_HOLD_ONLY=1, A_DEC=2.0, D_HOLD_MIN/MAX=6/7, MIN_DIST=2.5, PITCH_COMP=1.3, BAND_KP=0.4; emergency brake at alpha>0.033; 2-stage SEARCH |
+| target_mover | `target_mover.py` v10.10 | traj_track_kp=1.0; Option B for T6/T7; continuous vz bounce for T8; one-way T2/T3; RISE_TO_Z=14m, Z_FLOOR=12m, Z_CEIL=24m |
+| random_spawn | `random_spawn_target.py` v3.2 | Spawn 8–12 m in front, ALLOWED_ZONES {5,6,7,9}, zone 7 center (-45,-130), SPAWN_YAW=96 for T2/T3 |
+| takeoff_both | `takeoff_both.py` v10.0 | TAKEOFF_ALT=14m; ARM_ATTEMPTS=40; disarms both on abort |
+| flight_logger | `flight_logger.py` | 20 Hz; raw_det/flt_det=REAL/PRED/NONE; emerg flag; pitch/roll logged (needed for RL obs) |
+| launch_stack | `launch_stack.sh` | `launch_stack.sh CONFIG TRAJ ZONE SEED [DURATION]`; VIEWER=0 for headless; HEADLESS=1 for no gzclient; NO_LOCKSTEP=1 for nolockstep mode; SPEED_FACTOR for nolockstep speedup |
+| ms6_run_cells | `ms6_run_cells.sh` | Official C1/C2 matrix runner; per-trajectory env (standoff, vertical package, spawn yaw) |
 
-**Configurations:**
-| Config | Pipeline | Key rosparams | Status |
-|---|---|---|---|
-| 1 | YOLO + IBVS (fuzzy-λ) | `use_ppo:=false`, `detection_source:=raw` | **Active** |
-| 2 | YOLO + Kalman + IBVS (fuzzy-λ) | `use_ppo:=false`, `detection_source:=kalman` | **Active** |
-| 3 | YOLO + Kalman + PPO + IBVS | `use_ppo:=true`, `detection_source:=kalman` | **PARKED** (PPO pending supervisor) |
-| 4 | End-to-end image→velocity | — | **PARKED** |
-
-**Ablation integrity (verbatim, critical):** Config 1 and Config 2 use the **IDENTICAL** fuzzy-scheduled IBVS; the **ONLY** difference is the Kalman filter. Config 1 stays `detection_source=raw` with **NO filtering added**. `lambda_gain` comes from the scheduler in **both** configs. (Phase 1 of the scheduler uses alpha only — identical in raw/kalman modes. Phase 2's alpha-rate input is the controller-internal Kd_a feedforward signal, also identical in both modes — so adding it does not break Config-1 integrity.)
-
-**All M9.x simulations to date are tuning runs — NOT comparison data.**
-
----
-
-## 6. Control Chain — What Each Block Actually Controls
-
+**Target PX4 instance launch (DUAL SITL — per-instance working dir REQUIRED):**
+```bash
+PX4_BUILD=~/PX4-Autopilot/build/px4_sitl_default
+mkdir -p "$PX4_BUILD/instance_1"
+(cd "$PX4_BUILD/instance_1" && PX4_SIM_MODEL=iris \
+   "$PX4_BUILD/bin/px4" -i 1 -d "$PX4_BUILD/etc" -w sitl_iris_1 -s etc/init.d-posix/rcS)
 ```
-IBVS → /mavros/setpoint_raw/local (PositionTarget, FRAME_BODY_NED:
-        vx, vy, vz, yaw_rate — body-frame VELOCITY setpoint)
-     → MAVROS → PX4 SITL cascaded controllers
-        (velocity → attitude → rate → motor mixing)
-     → 4 motor PWM → Gazebo Iris physics
-```
-
-- **PX4 handles ALL low-level flight control** — velocity→attitude→rate→mixing, thrust limits, stabilization. **This is NOT our code.**
-- **IBVS maps visual pixel error → desired body-frame velocity setpoint.** It does NOT command motors and does NOT model aerodynamics.
-- Therefore **"adaptive IBVS" = adapting how pixel error maps to velocity setpoints (the gains), never touching motor-level control.**
-- The "IBVS" here is a per-axis PD/PID controller in pixel/alpha space (not the literal `vc = -λ·Le⁺·e` interaction-matrix form). The `λ`/`gain` term is a single forward-aggression multiplier — that is the knob the fuzzy scheduler tunes.
-- **target_mover** commands the target via `/target/mavros/setpoint_raw/local` (FRAME_LOCAL_NED velocities + yaw_rate).
+- DO NOT set `PX4_SIMULATOR=gazebo` (NO-OP in v1.13.3)
+- DO NOT set `PX4_GZ_MODEL_NAME` (gz-sim/Garden only)
+- `-i 1` → TCP port 4561; `interactive:=false` on T1 launch (no pxh stdin-EOF kill)
 
 ---
 
-## 7. Adaptive IBVS — Fuzzy Gain Scheduling Plan (No RL)
+## 8. Coding Rules
 
-**Decision (locked): Mamdani fuzzy gain scheduling**, reusing the FuzzyEscaper pattern from `target_mover.py` (triangular/trapezoidal MFs, max-min inference, centroid defuzzification). Citation: **Fu et al., Drones MDPI 2023** (fuzzy gain scheduling of IBVS — classical replacement for PPO's λ). Formula-based scheduling = documented fallback if fuzzy tuning stalls.
+**HARD RULES:**
+- **ADDITIVE for RL:** Zero edits to `ibvs_controller_node.py`, `kalman_filter_node.py`, `target_mover.py`. RL = new files only.
+- **UNIFORM CONTROLLER:** Final/comparison results use IDENTICAL controller across all trajectories. No per-traj parameter changes in reported numbers.
+- **Push from `~/Fyp_Drone_Detection_Tracking/` only.** Never `git init` inside `catkin_ws/`.
+- **Results stay OUTSIDE the git repo** (in `~/fyp/Results/`).
 
-**What it replaces:** the fixed `0.70` λ-fallback. In `compute_velocities()`:
-```python
-lam_gain = (.4 + .6*self.lam) if self.ppo_is_active() else .70   # 0.70 = the constant the scheduler replaces
-gain = gain_scale * lam_gain
-```
-`gain` multiplies **both** the K_far approach branch (`vx_p = K_far·√(-ea-dead)·gain`) **and** the K_near brake branch (`vx = -K_near·√(ea-dead)·gain`), so a single multiplier modulates forward aggression symmetrically — exactly where PPO's λ acted.
-
-### Phase 1 — schedule `lambda_gain ∈ [0.4, 1.0]` from alpha ONLY
-- K_far=35, K_near=6, all Y/Z/yaw PIDs stay fixed. One fuzzy output, one input.
-- Draft rules: alpha VERY_SMALL → HIGH gain; SMALL → MED_HIGH; MEDIUM → MEDIUM; LARGE → MED_LOW; VERY_LARGE → LOW.
-- MF breakpoints anchored to: `alpha_star = 0.0067`, `ea_HOLD = ±0.010`, `alpha_min_valid = 0.0005`, working range `0.001–0.04`.
-- **Config-integrity safe:** alpha is identical in raw and kalman detection modes.
-
-### Phase 2 — only if Phase 1 plateaus: add controller-internal alpha-rate
-- Input = the `dea`/Kd_a feedforward signal IBVS already computes (identical in both detection modes).
-- Rules: close + fast-closing → LOW; far + receding → HIGH; mid + stable → MEDIUM; very close → MINIMUM.
-
-### Phase 3 — if still needed: schedule K_far / K_near directly.
-
-### Safety / observability (all phases)
-- **Slew-rate limit** on gain (≤ 0.02 per 20 Hz cycle).
-- **Hard clamp** to universe bounds.
-- New `sched_gain` column in `flight_logger` → gain-vs-distance plot is the report evidence of adaptation.
-
-**Ablation integrity (verbatim):** Config 1 and Config 2 use the IDENTICAL fuzzy-scheduled IBVS; the ONLY difference is the Kalman filter. Config 1 stays `detection_source=raw` with NO filtering added. `lambda_gain` comes from the scheduler in both configs.
+**STYLE:**
+- Strategy before code; discuss rationale first
+- Diagnostic-first debugging (isolated tests before fixes)
+- Prefer complete file rewrites via `cat > file << 'PYEOF'` heredocs
+- Bash mistake to watch: `source X && source Y rosrun` — must be `source X && source Y && rosrun`
+- VIEWER=1 + LOSS_TIMEOUT=10 for diagnostic flights; HEADLESS=1 VIEWER=0 for RL training
+- Keep DISPLAY set + gzclient alive (or HEADLESS=1) — FPV camera stops without Gazebo rendering
+- ~15s between runs for cleanup
+- det% is the CANARY — check before blaming the controller; restart WSL between marathon sessions
 
 ---
 
-## 8. Kalman & SEARCH Parameter Optimization Plan
+## 9. Key Learnings
 
-**Current Kalman M9.8 (confirmed in code):** `R=diag[6,6,5]`, `Q=diag[0.5,0.5,3,6,6,3]` (so Q_vel cx/cy = **6.0**), `PIXEL_JUMP_OUTLIER=180px`, `MAX_CONSECUTIVE_REJECTIONS=4`, `velocity_damping=0.88`, publishes `/drone_tracking/filtered_target` + `/drone_tracking/kalman_velocity`.
-`<!-- RESOLVED 2026-06-10 (B10 extension): the stale "Q_vel cx/cy 6.0→3.0" docstring claim was DELETED and the title / changelog / startup log unified to "M9.8" (strings only). Live Q_vel stays 6.0 (correct, unchanged). -->`
+**IBVS:**
+- `ea_HOLD=0.010` is the #1 parameter (was 0.005 → 0% HOLD)
+- `alpha_dist_k=0.077` calibrated from α·d² vs GT (0.096 over-read 13%)
+- d_hat = √(k/α) — use ONLY on REAL detections (PRED frames steer, never teach distance)
+- HOLD gate uses pitch-compensated ey_c (raw ey biased ~0.24 from cruise pitch → T3 0%-HOLD artifact)
+- Integrator ceiling trap (F7): Ki·int_d_max·gain must exceed target cruise speed
 
-### R tuning (AFTER v8s deployment only — R is model-dependent)
-Plan a reusable `measure_yolo_noise.py` (do not write yet):
-- Subscribe to `/drone_tracking/target_center` + `/gazebo/model_states`.
-- Project ground-truth target into camera frame using chaser pose + `iris_fpv_cam` **EXTRINSICS read from the SDF** (not assumed identity) + intrinsics (f≈307 px, cx=320, cy=240). Nearest-timestamp matching.
-- Measure during **MOTION** (T4 circle, 60–120 s) — hover-only σ is optimistic; optionally also a hover run for a hover-vs-moving comparison table.
-- Output σ_cx / σ_cy / σ_alpha (optionally distance-binned), recommended R vs current [6,6,5]; data → `~/results/yolo_noise_characterization.csv`.
-- **Build ONE reusable ground-truth-projection utility** shared with the Q-sweep analyzer. Re-run after ANY YOLO change.
+**Kalman / Detection:**
+- R=[6,6,5] final (R=[25,15,3000] TESTED AND REJECTED — worse on fast depth-change T7/T9)
+- Q_vel=6.0 final (sweeps {2,4,6,8,10,12,14} — 6 wins; no live flights warranted)
+- Detection failure on T6/T7 = in-frame small-target RAW miss (~91%), not gate (9%); control side exhausted
+- Camera: 640×480 native, fx=277 live (not 307 from SDF); imgsz-1280 is upsampling only
 
-### Q tuning (target-behavior-dependent; carries across YOLO models)
-- Q_pos stays 0.3–1.0; **Q_vel is the critical knob.** Sweep `Q_vel ∈ {2,4,6,8,10}` (current = 6).
-- Per value, run the gate protocol; metrics: mean |cx_filt − cx_gt| in HOLD, derivative-signal std, SEARCH recovery time, HOLD% stability.
+**Dual SITL:**
+- Per-instance working dir (`-w sitl_iris_1`) REQUIRED — without it lockstep destabilises
+- mavparam writes persist across runs via PX4 eeprom → launch_stack explicitly restores CHASER_ZDN
+- Lockstep RTF = always 1× on WSL2 regardless of world file `real_time_factor`
+- `PX4_SIM_SPEED_FACTOR` in lockstep = FATAL (EKF fault → PX4 SIGABRT)
 
-### velocity_damping + SEARCH consistency
-- Sweep `damp ∈ {0.82, 0.85, 0.88, 0.91, 0.94}`.
-- **Consistency check:** useful-velocity lifetime `T_useful = −1/(20·ln(damp))`. At damp=0.88 → ≈0.39 s, but SEARCH Stage 1 lasts 3.0 s → ~2.6 s of Stage 1 extrapolates on stale velocity.
-- Options: raise damp, shorten Stage 1, or (preferred long-term) replace the hard stage cutoff with `trust_factor = damp^(dropout_frames)` blending.
-
-### PIXEL_JUMP (after v8s deployment)
-- Measure max legitimate frame-to-frame centroid jump during fast T7/T9; set `PIXEL_JUMP = 1.5 × max`.
-
-### Universal protocol (every change above)
-2×T7 {42,43} gate + 2×T9 {42,43} stress; 10 Hz logging; **commit only if no regression on BOTH T7 flights.**
-
----
-
-## 9. Known Bugs (B1–B10)
-
-Identified 2026-06-10 against master; **all FIXED in Phase B (2026-06-10)** unless noted. File + location given.
-
-| ID | File / location | Bug | Fix | Status |
-|---|---|---|---|---|
-| **B1** | `target_mover.py` `_compute_fuzzy_velocity` (~L474) | `if phi>0.40: au=(phi-.60)/.40` fires at phi>0.40 but formula assumes phi≥0.60 → for phi∈(0.40,0.60) `au<0`, so `f_vz=ed*1.3*au` moves target TOWARD chaser altitude (anti-escape). Also OVERWRITES the 9 fuzzy altitude rules whenever phi>0.40. | Threshold to 0.60 (or clamp au∈[0,1]); deliberate blend-vs-overwrite. | **FIXED** |
-| **B2** | `launch_stack.sh` T5 (~L88) | Target PX4 uses `PX4_GZ_MODEL_NAME=` (gz-sim / Gazebo Garden syntax) — wrong for PX4 v1.13.3 + Gazebo Classic; instance likely never binds to the spawned model. | ~~Use `PX4_SIM_MODEL=iris PX4_SIMULATOR=gazebo ./bin/px4 -i 1 -s etc/init.d-posix/rcS`~~ — **this "fix" was itself broken** (ran instance 1 with no working-dir isolation → destabilised lockstep → killed the chaser PX4 → Gazebo closed; `PX4_SIMULATOR` is a no-op, not a 2nd-gzserver trigger). | **SUPERSEDED → see "T5 fix" (2026-06-10): per-instance `-w` working dir, PX4's multi-instance form. See §M7.3.** |
-| **B3** | `extract_metrics.py` (~L46) | `detected = r.get('raw_det','') in ('1','1.0','True')` — but logger writes `"REAL"/"NONE"` → detection_rate always 0. | `== 'REAL'`; add filtered detection rate. | **FIXED** |
-| **B4** | `launch_stack.sh` `wait_topic()` (~L48,L120) | Checks topic EXISTENCE (`rostopic list \| grep`), not content. `/drone_tracking/takeoff_ready` exists (latched advert) long before takeoff completes → mission starts mid-climb. | `wait_bool_true()` waiting for `data: True` (takeoff_both publishes `Bool(data=True)`); keep `wait_topic` for `/mavros/state`, `/target/mavros/state`. | **FIXED** |
-| **B5** | `launch_stack.sh` T11 (after T10) + `flight_logger.py` | Logger launched LAST (after target_mover) → misses TAKEOFF + early SEARCH. Logging rate only 4 Hz. | Launch logger BEFORE takeoff_both; raise 4 Hz → 10 Hz. | **FIXED** |
-| **B6** | `target_mover.py` `_gazebo_states_cb` (~L273) | Bare `except: pass` swallows model-name mismatches → fuzzy distance silently computed from zeros. | Warn-once if `_got_world_pos` still False ~5 s into MOVING (don't change matching logic). | **FIXED** |
-| **B7** | `run_config.sh` (~L43) | "random" zone/traj uses unseeded `$RANDOM` → batches not reproducible; no deterministic matrix mode. | Add `--matrix` (iterate T1–8 × zones {5,6,7,9} = 32 runs, seed=SEED_START+index); `--matrix --repeats N` offsets seeds by 100/repeat. | **FIXED** |
-| **B8** | `cleanup.sh` | No log hygiene → 480 runs flood `~/.ros/log` + `/tmp/T*.log`. | Append `rosclean purge -y`; delete `/tmp/T*_zone*` older than 7 days. | **FIXED** |
-| **B9** | `extract_metrics.py` | Missing frozen metrics: filtered detection rate, recovery-time-after-loss, wrong-direction%. | Add `flt_detection_rate`, `pred_rate`, `mean_recovery_time_s`, `wrong_direction_pct` (reuse `analyze_flight_log.py` definition: APPROACH+HOLD+REAL rows where `(ea<-0.002 and cmd_vx<-0.05) or (ea>0.002 and cmd_vx>0.05)`). Append new columns at end (back-compat). | **FIXED** |
-| **B10** | `ibvs_controller_node.py` L119; `target_mover.py` strings/docstring; `kalman_filter_node.py` (extension) | Stale version strings: IBVS startup log "v6.22" (file v6.25); target_mover logs/banner "v10.3" (file v10.5); comment "clamp 4.0" but code clamps 3.5; Kalman titled "M9.8" but log/changelog say "M9.6" with a stale "Q_vel 6.0→3.0" claim. | IBVS log→"v6.25"; target_mover strings→**v10.6** + docstring universe [1.0,3.5]; **SPRINT MF rescaled to trap(3.00,3.35,3.50,3.50)** to fit the sampled universe (finishes the v10.5 rescale — deliberate behaviour change, T9 baseline resets); Kalman strings unified to "M9.8" + stale Q_vel claim deleted (no numeric change). | **FIXED** |
-
-`<!-- RESOLVED 2026-06-10: code wins — universe _SP = [1.0,3.5], output min(...,3.5). The v10.5 rescale was incomplete (only the universe was shrunk; SPRINT MF was left at trap(3.20,3.60,4.00,4.00) with its plateau outside [1.0,3.5] → top escape speed silently capped at 0.75 membership). v10.6 finishes it: SPRINT=trap(3.00,3.35,3.50,3.50); docstring/comments say [1.0,3.5]. Deliberate behaviour change → T9 baseline resets. -->`
+**RL-specific:**
+- Online SAC training needs CONTAINED moving target — use T4 orbital (T2/T3 fly off-island → STUCK abort)
+- Nolockstep TIMESYNC fix: split T1 launch, override use_sim_time=false after Gazebo starts, launch MAVROS separately
+- `real_time_factor=4` in world + `PX4_SIM_SPEED_FACTOR=4` → 4× RTF in nolockstep
+- Plugin constraint: `real_time_update_rate % 250 = 0` AND `1/real_time_update_rate = max_step_size` (250/0.004 ✓)
 
 ---
 
-## 10. Execution Order (locked)
+## 10. References
 
-> **Current position (2026-07-11, M11.2 — REVISED PLAN by Rawad, supersedes the numbered list below for the near term):** the vx/controller is FINALIZED on the T3 bench (see the 2026-07-11 changelog: hunt/dive/deadlock/altitude-bias all solved, launch defaults baked = plain run flies the tuned controller, oscillation at the noise floor on all four axes; 8-seed campaign-2 validating the race fix in flight). **Rawad's ordered plan: (1) finish campaign-2 + soft-centering A/B (in-band wander 5.5–6.5 m → ~±0.2); (2) TRAJECTORY-VERIFICATION pass — audit T1–T8 commanded-vs-actual geometry against the §M9.1 specs BEFORE trusting any trajectory (T3 lesson: "fast straight" was really a 60 m shuttle whose reversal flew through the chaser); (3) per-trajectory control hardening, Config 1, until very good on ALL of T1–T8; (4) Config 2 + Kalman improvement using the trajectory data (KF value only shows on hard trajectories — the R=[25,15,3000] lesson); (5) only then the official C1-vs-C2 comparison matrix — every run before that is tuning evidence, NOT final results.**
-
-1. **Fix B1–B10** (Phase B) → smoke-test `launch_stack` (Config 2, T4, zone 7, seed 42, 120 s).
-2. **YOLOv8s — DONE.** ✅ Trained + deployed as `best.pt` (= best_v4s.pt, 11.14M params, CUDA/RTX 4060); `~device`/`~conf` rosparams + rolling-fps log added (node v3.2); results restructured to `~/fyp/Results/`; live fps ≈ 19–20 measured; **n-vs-s table recorded (§11): v8s mAP50=0.990, mAP50-95=0.848, P=0.973, R=0.977 — statistically identical to v8n, pipeline-bound at runtime.**
-3. **Noise characterization** → update R. *(Unblocked once step-2 smoke test passes — R is model-dependent, now that v8s is deployed. PIXEL_JUMP re-check also pending per §8.)*
-4. **Q_vel sweep.**
-5. **Damping + SEARCH consistency + PIXEL_JUMP re-check.**
-6. **Fuzzy λ scheduler Phase 1** → gate → Phase 2 only if needed.
-7. **Freeze parameters** → full matrix: T1–T8 × zones {5,6,7,9} × Configs 1–2, ≥3 seeded repeats, paired significance test; T9 reported separately.
-8. **Report writing.**
-
----
-
-## 11. Current Component Versions (End of M9.6)
-
-| Component | Version | File | Key params / notes |
-|---|---|---|---|
-| YOLO model | **v4.1 (best_v41s.pt)** (deployed; flight-validation pending) | `~/drone_detection/models/best_v41s.pt` (node default now points here; v4s preserved as `best_v4s_backup.pt`) | YOLOv8s. **v4.1 trained with ~1200 background negatives to reduce phantom-lock FPs. Metrics: mAP50=0.991, mAP50-95=0.862, P=0.976, R=0.979. FP/100 on holdout: 1.4 (vs 0.0 v4s). Accepted: core metrics within tolerance, phantom-lock validation pending T7 flight test.** Prior v4s: 11.14M params, 28.6 GFLOPs, 130 layers, CUDA (RTX 4060, torch 2.4.1+cu121). v4n kept as `best_v4n.pt` rollback. **n-vs-s table recorded (see below §11) — closes the step-2 item.** v8m DROPPED. |
-| Detection node | **v3.3** (FP gate; flight-validation pending) | `yolo_detection_node.py` | 5-frame alpha median; publishes `/drone_tracking/target_center` (cx,cy,area) + `/drone_tracking/target_box` (cx,cy,w,h) + **`/drone_tracking/detector_status`** (String "STATE,conf,w,h"). `~device`/`~conf` rosparams; rolling-fps log (now + per-100-frame rejection counts). **v3.3 gate (T7 phantom-chase fix):** plausibility filter — box w ∈ [`~min_box_px` 3, `~max_box_px` 300] px (anchored to iris 0.52–0.77 m tip-to-tip, f=307: w_px=307·W/Z), w/h ∈ [`~aspect_min` 0.8, `~aspect_max` 6.0]; best PLAUSIBLE box wins (confidence order). **Acquisition persistence:** no accepted det > `~lost_after` (1.0 s) → LOST; re-acquisition needs `~persist_frames` (3) consecutive frames < `~persist_max_jump` (80 px) apart; node starts LOST; gated frames publish the NaN no-detection point. **Ablation-integrity argument: the gate decides WHICH detections exist; it does not filter coordinates of accepted ones — raw and kalman configs see identical behavior.** Model path still hardcoded. |
-| Kalman filter | M9.8 (file title) / logs "M9.6" | `kalman_filter_node.py` | R=diag[6,6,5], Q=diag[0.5,0.5,3,**6,6**,3], PIXEL_JUMP=180px, MAX_REJ=4, damp=0.88. Publishes `/drone_tracking/filtered_target` + `/drone_tracking/kalman_velocity`. |
-| IBVS controller | **v6.30** (SEARCH latch default-OFF; emergency guard VERIFIED on T4) | `ibvs_controller_node.py` | Output `/mavros/setpoint_raw/local` (FRAME_BODY_NED vx,vy,vz,wz). K_far=35, K_near=6, Kd_a=150, dead=0.002, smooth=0.15, Kp_y=1.8, **Kp_z=3.0**, pitch_comp=0.4, **alpha_star=0.0067**, **ea_HOLD=0.010**, HOLD=(\|ex\|<.12 ∧ \|ey\|<.12 ∧ \|ea\|<.010), **max_vx=4.5 (`~max_vx`; v6.27 — T3 proved 3.5 = zero closure on a 3.5 m/s target; PX4 MPC_XY_VEL_MAX=12 won't clip)**, max_vx_retreat=0.5. **λ-fallback=0.70** (→ fuzzy scheduler). **2-stage SEARCH** (Stage1 0–3s velocity-predicted 2.5 m/s; Stage2 3s+ 4.5 m/s ±30° sweep). **v6.30 SEARCH velocity-latch — DEFAULT-OFF opt-in evasion aid:** latch loss-instant `v0` × exponential decay `w(t)=exp(-t/τ)` for the SEARCH heading; `~search_latch` (default **False** → flag-off ≡ byte-for-byte v6.28), `~search_tau` (default 1.0 s), per-step clamp 12 px. SEARCH-only; HOLD/APPROACH untouched; Config-1 unaffected. τ sweep proved no win-both value — T7 is FOV/closure-limited (heading can't fix), T9 evasion recovery +52.8 at τ=1.0 only. **v6.26 emergency brake guard (VERIFIED in flight, T4 2026-06-11: 1 engagement, min_sep 1.59 m):** engage alpha>`~alpha_emergency` (0.033), release <`~alpha_emergency_exit` (0.0231); engaged → vx=−max_vx (now −4.5; bypasses smooth + retreat clamp), publishes `/drone_tracking/emergency_brake`. rosparams `~use_ppo`, `~detection_source`, `~alpha_emergency`, `~alpha_emergency_exit`, `~max_vx`, `~search_latch`, `~search_tau`, **`~Kp_wz` (default 0.9)**, **`~Kp_y` (default 1.8)**. **M10.3 (`ea75620`): `~Kp_wz`/`~Kp_y` rosparam-overridable (defaults = baseline) for the angular-tracking gain sweep — swept ×1.67/×1.5, FLAT (sixth lever ruled out, see changelog); gains UNCHANGED in file, Kd_wz/Kd_y stay fixed.** **M10.3 vertical probe (2026-06-30): `~Kp_z` (default 3.0) + `~max_vz` (default 1.5) rosparam-overridable (`KP_Z`/`MAX_VZ` launch knobs), banner logs Kp_z/max_vz. Swept Kp_z ×1.5/×2.0 + max_vz ×1.5 on T6/T7 — FLAT (seventh/eighth levers ruled out; ey failure = detection-limited); Kp_z=3.0/max_vz=1.5 UNCHANGED in file, Ki_z/Kd_z fixed.** |
-| PPO agent | v5.2 | `ppo_agent_node.py` | **PARKED.** Near-constant output. Weights `ppo_policy_weights_v5.pth`. |
-| target_mover | **v10.6** (was v10.5; +B1, +B10) | `target_mover.py` | 7-axis Mamdani fuzzy evasion. Speed defuzz universe **[1.0,3.5]** (`_SP`), output `min(...,3.5)` → speed ∈ [1.0,3.5]. Output `/target/mavros/setpoint_raw/local` (FRAME_LOCAL_NED). `~trajectory` (T1–T9), `~seed`. |
-| random_spawn | **v3.2** (2026-06-11) | `random_spawn_target.py` | 9 zones, ALLOWED_ZONES {5,6,7,9}, jitter, z=0.5m, `~seed`, `~zone`, `~dist`. **Spawn separation 8–12 m — LOCKED protocol parameter (was 3–6 m; see §13).** **v3.2: zone 7 center (−45,−170)→(−45,−130) + CLEAR_VIEW_YAW (zone 7 faces east π/2±40°, same single yaw draw remapped → zones 5/6/9 unchanged per seed) — PRE-BASELINE then LOCKED (§13).** |
-| takeoff_both | **v10.0 (VERIFIED in flight 2026-06-11)** | `takeoff_both.py` | **TAKEOFF_ALT=14.0m.** ARM_ATTEMPTS=40 (~20 s sim — outlasts post-teleport EKF alignment); disarms BOTH drones if arming aborts. Publishes latched `/drone_tracking/takeoff_ready` + `/drone_tracking/target_takeoff_ready` (Bool data=True at completion). |
-| cleanup | done (+B8) | `cleanup.sh` | Kills all ROS/PX4/Gazebo; frees ports; rosclean purge + old /tmp log delete. |
-| launch_stack | +B2→**T5fix**,B4,B5,**pxh-EOF fix**,+TV,**+seq gates (VERIFIED)**,**+loss watchdog** | `launch_stack.sh` | One full run: `launch_stack.sh CONFIG TRAJ ZONE SEED [DURATION]` (DURATION default **300 s**). T1 roslaunch passes **`interactive:=false`** (px4 `-d`, no pxh — pxh stdin-EOF was the real chaser-killer; see changelog). T5 = PX4 multi-instance form (`-w sitl_iris_1`, rootfs `<build>/etc`); see §M7.3. Stage **TV** auto-starts the debug viewer (`VIEWER=0` to skip). **Readiness gates:** `wait_fcu` after T1 + T6, `wait_sim_time 25` before T10 — **verified in flight 2026-06-11 (3/3 clean).** **Loss watchdog:** phase SEARCH for `LOSS_TIMEOUT` s (default **10** = tuning; `--matrix` exports **60** — protocol rule, see changelog) → abort run, save CSV/analysis/metrics ("RUN ABORTED" tag, `aborted=1`), batch continues (abort path not yet exercised). **First-acquisition grace:** SEARCH counts only after the first APPROACH/HOLD. Mission end prints "Xs wall / Ys sim". Env knobs: `VIEWER`, `START_DIST`, `LOSS_TIMEOUT`. |
-| run_config | **VERIFIED 2026-06-11** (+B7, +auto-sync, +matrix LOSS_TIMEOUT) | `run_config.sh` | Batch loop; `--matrix` deterministic grid (**exports LOSS_TIMEOUT=60** — official runs measure recovery; aborts are recorded outcomes); calls `sync_results.sh` at batch end. Validated 2/2 (seeds 42/43). |
-| sync_results | **v2 2026-07-12 (reference split)** | `sync_results.sh` | Two targets: raw `~/fyp/Results` → OneDrive `FYP/Results_raw` (screenshots/diagnostics excluded) + curated `~/fyp/Results_reference` → OneDrive `FYP/Results` (with `--delete`; the reference folder, never touched by batches). Manual or batch-end. |
-| yolo_debug_viewer | **v1.2** | `yolo_debug_viewer.py` | Live bbox overlay window. **v1.2: detection rate = ROLLING last-300-frames window (was cumulative); shows box conf + w×h; [GATED] tag while detector v3.3 is LOST/CONFIRMING (candidate shown but withheld from the controller).** Stale box cleared after 0.5 s (+NO DETECTION banner). Auto-launched as stage TV; press Q or cleanup kills it. |
-| extract_metrics | done (+B3,B9; M9.6 step 2 path; **+step 3 cols**) | `extract_metrics.py` | Appends one row to `~/fyp/Results/summary.csv`. **2026-06-11 consolidation: old-schema file archived as `summary_archive_preEmerg.csv` (4 pre-guard tuning rows); `summary_v2.csv` promoted to `summary.csv` (append verified, no divert).** Header-mismatch safety divert (→ `summary_v2.csv`) still in place. END-appended: `emergency_brake_pct`, `emergency_brake_count`, `aborted` (from `--aborted`), `mission_duration_s` (logged sim span), **`hold_yaw_zerocross_hz` (M10.3 `ea75620` — cmd_wz sign-changes/s over HOLD; the over-gain/dropped-damping-ratio detector; local summary.csv migrated +1 trailing col to avoid divert).** |
-| flight_logger | M9.3 (+B5 → 10 Hz; **+`emerg` col**) | `flight_logger.py` | Output `~/flight_log_latest.csv`; `raw_det`/`flt_det` = REAL/PRED/NONE; `true_dist_3d`, `world_alt_err`; **`emerg`** ('1'/'0', END-appended) from `/drone_tracking/emergency_brake` — a flag, NOT a phase (watchdog/HOLD% parse the phase string unchanged). |
-| analyze_flight | M9.3 | `analyze_flight_log.py` | 23+ sections incl. wrong-direction events. |
-| plot_run | new 2026-06-11 | `plot_run.py` | 4-panel QA PNG per flight CSV (XY shape / altitude+phase shading / separation+min / alpha vs v6.26 guard thresholds, log). `--batch DIR` renders every `*.csv` (skips up-to-date PNGs) + one-line summary per run. XY panel = per-drone LOCAL frames (shape QA only — world XY never logged; separation truth = panel 3). Pre-`emerg` CSVs handled gracefully. |
-
-### YOLOv8 n-vs-s comparison (report table, recorded 2026-06-12)
-
-Both trained on the v4 dataset (Colab, from COCO weights, epochs=80, seed=42, identical data/augmentation).
-
-| Model | Params | mAP50 | mAP50-95 | Precision | Recall | Colab T4 fps | Live in-pipeline fps (RTX 4060) |
-|---|---|---|---|---|---|---|---|
-| YOLOv8n (`best_v4n.pt`, rollback) | 3.2M | 0.991 | 0.848 | 0.971 | 0.979 | 75 | ~19–20 |
-| **YOLOv8s (`best.pt`, deployed)** | 11.1M | 0.990 | 0.848 | 0.973 | 0.977 | — (not recorded) | ~19–20 |
-
-**Takeaway:** accuracy metrics are statistically indistinguishable on this dataset; live fps is identical (~19–20) because the pipeline (ROS image transport + per-frame Python overhead), not the model, is the bottleneck on the RTX 4060 — so v8s's extra capacity is free at runtime. v8s deployed per supervisor decision; v8m dropped.
-
-### Iris target true dimensions (from `iris.sdf` — gate-bound anchor, recorded 2026-06-12)
-
-Body box **0.47 × 0.47 × 0.11 m**; rotors at (±0.13, ±0.20/0.22) m with prop radius **0.128 m** → tip-to-tip span **0.696 m** (lateral Y), **0.516 m** (longitudinal X), **0.767 m** (diagonal). Expected YOLO box width w_px = 307·W/Z (f=307 px, W≈0.70 m representative): Z=5 m → 43 px, 10 m → 21 px, 15 m → 14 px, 20 m → 11 px, 30 m → 7 px, 40 m → 5 px, 60 m → 3.6 px. Detection-gate bounds derived: `~min_box_px`=3 (0.52 m narrow aspect at 60 m → 2.7 px), `~max_box_px`=300 (0.77 m diagonal at 0.8 m → 295 px).
-
----
-
-## 12. Known Remaining Issues (Priority Order)
-
-*(Renumbered 2026-06-11 when the collision issue was opened: old P1–P6 → P2–P7.)*
-
-**P1 — Chaser-target collision: GUARD VERIFIED IN FLIGHT (T4 trio run 2026-06-11: 1 engagement, min_sep 1.59 m — no 0.4 m-class event).** Note v6.27 raises engaged brake authority to −4.5 (vx=−max_vx). Originally observed in flight (T2 z5 seed42: 0.40 m closest approach at sim 144, alpha peak 0.353). **Forensics (2026-06-11) corrected the root-cause ranking:** the dominant cause is the **`max_vx_retreat=0.50` m/s brake clamp** — `cmd_vx` was pinned at −0.50 for the entire 6 s drift from 2.1 m → 0.40 m, so any target closing faster than 0.5 m/s out-runs the brake (K_near=6 vs K_far=35 asymmetry is real but secondary: the K_near branch had already saturated the clamp). **Kalman diagnostic answered: NOT a main contributor** — only 3 close-range collapse-rejection rows near the peak; PRED bridging tracked correctly; IBVS was braking on good data, it simply had no authority. **Fix deployed:** `ALPHA_EMERGENCY=0.033` (`~alpha_emergency`; 3.6× the healthy-HOLD ceiling 0.0091 from T1/T2, ~2× the HOLD band ceiling 0.0167, 10× below the collision peak; crossed 5.2 s before closest approach in the recorded collision), exit hysteresis at 0.7× = 0.0231 (`~alpha_emergency_exit`); engaged → `vx=−max_vx` bypassing vel_smooth and the retreat clamp, vy/vz/wz keep tracking; lost-while-engaged → release to SEARCH (never brake blind); `emerg` flag column in flight_logger + `emergency_brake_pct`/`emergency_brake_count` in summary. Identical in all configs (ablation-safe). Known limit: pure-alpha trigger ⇒ <1 s margin at a hypothetical full 3.5 m/s closure (see changelog); recorded real closures were 0.3–0.5 m/s. The fuzzy λ scheduler (step 6) remains the systematic fix; the guard is the safety envelope beneath it.
-
-**P2 — HOLD% inconsistency (26–98%)** *(was P1)*: SEARCH separation sometimes reaches 30–44m before re-acquisition; recovery loss 40–52s. The 2-stage velocity-predicted SEARCH helps but doesn't always recover in time. Primary reliability bottleneck. *(2026-06-11: the 8–12 m spawn fix removed the immediate post-takeoff loss component. Trio decomposed the rest into two named causes, both fixed pending re-run: **T3 = max_vx speed ceiling** (3.5 vs target 3.5 → no closure; v6.27 = 4.5) and **T7 = tree-line false-positive capture during SEARCH** (phantom pulled the phase out of SEARCH, resetting the watchdog and corrupting recovery; detector gate v3.3). Re-run quantifies what inconsistency remains.)*
-
-**P3 — Altitude error** *(was P2)*: historical +0.40m (best +0.23m). **2026-06-11 finding: target-motion-dependent** — measured −0.02 m on a static target (T1) vs +0.18 m at 1 m/s (T2); expect worse at higher speeds. pitch_comp=0.4 helps; consider world-frame altitude feedback.
-
-**P4 — Infrastructure bugs B1–B10** *(was P3)*: fixed in Phase B; **sequencing gates + takeoff_both v10.0 + batch chaining VERIFIED in flight 2026-06-11 (3/3 clean launches).** Watchdog abort path not yet exercised in flight.
-
-**P5 — YOLOv8s deployment** *(was P4)*: **DONE (M9.6 step 2)** — v8s deployed as `best.pt` (11.14M params, CUDA/RTX 4060), node v3.2 with `~device`/`~conf` + fps log, results restructured to `~/fyp/Results/`. **Live in-pipeline fps measured ≈ 19–20 (2026-06-11). n-vs-s table recorded (§11, 2026-06-12) — CLOSED.** Unblocks R characterization (step 3).
-
-**P6 — YOLOv8m** *(was P5)*: **DROPPED** (n-vs-s comparison only).
-
-**P7 — PPO v5.2 / Config 3** *(was P6)*: **PARKED** pending supervisor decision on the RL redesign. The deployed λ adaptation is fuzzy, not RL.
-
----
-
-## 13. Spawn Zones Reference
-
-World: Baylands terrain. Safe coordinate range: X=[-343,343], Y=[-269,269]. Model pose z offset handled in `random_spawn_target.py`.
-
-**LOCKED PROTOCOL PARAMETER (2026-06-11): target spawn distance = 8–12 m in front of the chaser** (`random_spawn_target.py` v3.1; was 3–6 m — the old value caused instant target loss + 59 s SEARCH on the smoke run). This defines the initial conditions for **ALL** future runs; `~dist` / `START_DIST` overrides are for diagnostics only. **Changing this later = mandatory baseline reset.**
-
-**Zone 7 geometry adjusted PRE-BASELINE then LOCKED (v3.2, 2026-06-11):** center (−45,−170) → **(−45,−130)** (≥42 m from the y=−180 land edge at full jitter; was as little as 2 m) and **spawn yaw constrained east (π/2 ± 40°, `CLEAR_VIEW_YAW`)** so the initial 8–12 m view has open ground/sky behind the target instead of the western tree line (T7 phantom-FP trigger area). The yaw draw count is unchanged, so zones 5/6/9 spawns stay identical per seed. No baseline data existed at the old geometry → no reset owed; from here this is part of the locked protocol.
-
-**Zone whitelist for evaluation:** {5, 6, 7, 9} (enforced as `ALLOWED_ZONES` in code; Zone 6 needs yaw-away from tree line at spawn).
-**Confirmed reliable zones (historical):** C(-80,50) and H(30,-80).
-
----
-
-## 14. Architecture Diagram (deployed Config 2)
-
-```
-FPV Camera (iris_fpv_cam, forward-facing)
-       ↓
-YOLOv8 detection node (v3.1)
-  → /drone_tracking/target_center  (cx, cy, area)
-  → /drone_tracking/target_box     (cx, cy, w, h)
-       ↓
-Kalman filter node (M9.8)   [Config 2 only; Config 1 = raw]
-  → /drone_tracking/filtered_target (smoothed cx, cy, area; z<0 = prediction)
-  → /drone_tracking/kalman_velocity (vx, vy, valpha — SEARCH direction)
-       ↓
-[PPO agent node (v5.2)  — PARKED, Config 3 only]
-       ↓
-IBVS controller node (v6.25)
-  ex = (cx-cx0)/cx0 - x* ;  ey (+ pitch comp) ;  ea = alpha - alpha_star
-  vx from K_far/K_near·√(|ea|)·gain  (+ Kd_a feedforward) ;  vy,vz,wz = PID
-  gain = gain_scale · λ_fallback(0.70)   ← fuzzy scheduler will replace 0.70
-  → /mavros/setpoint_raw/local  (PositionTarget, FRAME_BODY_NED: vx,vy,vz,yaw_rate)
-       ↓
-PX4 / MAVROS (velocity → attitude → rate → motor mixing → Gazebo physics)
-```
-
-**State machine (IBVS):** TAKEOFF → SEARCH → APPROACH → HOLD ↔ (stale/lost) → SEARCH.
-
----
-
-## 15. Key Learnings & Failure Modes
-
-### IBVS
-- **ea threshold is the #1 parameter.** ea < 0.010 for HOLD transition (was 0.005 → 0% HOLD).
-- SEARCH separation > 30m + 40s re-acquisition gap is the primary HOLD% inconsistency driver.
-- **Output is `/mavros/setpoint_raw/local` with FRAME_BODY_NED (body-frame velocity).** *Historical M7 lesson:* `setpoint_velocity/cmd_vel` interprets in WORLD frame — that earlier topic was abandoned in favour of `setpoint_raw/local` for body-frame control. (Do not reintroduce the cmd_vel/world-frame claim into the live architecture.)
-
-### Kalman
-- Q_pos=0.5 (not 3.0) — higher Q_pos causes cx/cy jitter.
-- PIXEL_JUMP=180px avoids rejecting legitimate fast target motion.
-- MAX_CONSECUTIVE_REJECTIONS=4 — faster fallback to predictions.
-- Close-range collapse rule: pixel jump > PIXEL_JUMP AND alpha drops from > 3000 to < 900 → reject.
-- velocity_damping=0.88 decays velocity during dropout (see SEARCH consistency note in §8).
-
-### PPO (parked)
-- Training alpha range MUST match real Gazebo (0.001–0.04); normalization (÷0.06) consistent train/deploy.
-- CPU faster than GPU for small MLP. Never export full SB3 `.zip` — `.pth` state_dict only.
-- Near-constant v5.2 output = domain gap, not architecture failure.
-
-### YOLO / Detection
-- pHash dedup threshold=20 removes ~44% of v4 frames while preserving diversity.
-- Close-range instability: alpha collapses when target fills frame → Kalman poisoning → fixed with collapse rejection rule.
-- Confidence threshold 0.35 for auto-labeling; `classes.txt` must stay `chmod 644`.
-
-### Dual SITL
-- MAV_SYS_ID mismatch silently breaks target MAVROS.
-- Target spawn height ≥ 0.5m (physics glitch below).
-- Never publish zero-velocity during WAITING (triggers premature OFFBOARD).
-- Each drone reports local_position=(0,0,0) at its own spawn — use `/gazebo/model_states` for world-frame inter-drone distance.
-
-### Git / Bash
-- Always push from `~/Fyp_Drone_Detection_Tracking/`. Never `git init` inside `catkin_ws`.
-- Recurring bash mistake: `source X && source Y rosrun` (space before `rosrun`). Must be `source X && source Y && rosrun`.
-- Prefer complete file rewrites via `cat > file << 'PYEOF'` heredocs.
-
----
-
-## 16. target_mover Behaviors (for report accuracy)
-
-- **T1–T8 are velocity-commanded** (open-loop velocity setpoints integrated by PX4) → slight ground-path drift vs the ideal geometric path is expected and acceptable; commands are identical per seed.
-- **Boundary repulsion applies to T9 ONLY** (`_repulsion_omega` is called only inside the fuzzy heading path). **T1–T8 have NO boundary handling** — containment comes from each trajectory's own geometry (T4/T5/T8 orbits; T2/T3 short one-way missions; T6/T7 the v10.10 horizontal shuttle). *(2026-07-11 audit correction: this section previously claimed repulsion confined all runs — WRONG for T1–T8.)*
-- **v10.10 trajectory-audit fixes (2026-07-11, Rawad's decisions; T2/T3/T6/T7/T8 baselines reset):** T2/T3 default = ONE-WAY straight (`~straight_max` default 60→99999; official runs use SHORTER durations sized to the island — the 60 m shuttle default was a containment hack whose reversal flew back through the chaser); T6/T7 horizontal leg = SHUTTLE at `INCLINE_MAX_DIST`=60 m (was one-way on a random azimuth → left the island inside 300 s), vertical bounce unchanged; T8 vz = continuous triangle-wave bounce between Z bounds (was single up-down keyed on hardcoded `HELIX_HALF_TIME=50` → sat on the floor from ~130 s = flat T4 duplicate). T1/T4/T5 verified matching spec in code (T1 has no altitude hold — PX4 holds vz=0).
-- **All randomness uses Python `random`, seeded via `~seed`** → T1–T8 fully reproducible per seed; **T9** is seed-deterministic in its random draws but closed-loop reactive (depends on live chaser pose), so it is a stress test, never an accept criterion.
-- Phase flow: `WAITING → RISING → SETTLING → MOVING`. RISE_TO_Z=14m, Z_FLOOR=12m, Z_CEIL=24m.
-
----
-
-## 17. Coding Preferences (Rawad's Style)
-
-- **UNIFORM CONTROLLER for final/comparison results (2026-08-06, HARD RULE):** every trajectory in a final or comparison result set MUST run the IDENTICAL controller — do NOT change any control-law parameter value from one trajectory to another. Per-trajectory overrides are for TESTING/diagnostics ONLY, never for reported numbers. A universal "improvement" must be safe (neutral-or-better) on ALL trajectories at ONE value; if it needs per-trajectory scoping to stay safe (e.g. the `D_LPF=0.5`-on-T3 hack), it is the WRONG mechanism — fix the mechanism, don't scope the value. (Open question flagged 2026-08-06: whether this also forces unifying the standoff band + vertical package, which currently vary per trajectory with a principled scenario-based justification.)
-- **Strategy before code:** discuss logic and rationale before implementation.
-- **Diagnostic-first debugging:** isolated tests before fixes.
-- **Complete file rewrites** via `cat > file << 'PYEOF'` heredocs (not `cp`).
-- **sed/Python patches** for targeted edits.
-- **GitHub workflow:** Rawad pushes; Claude fetches via raw URL, modifies, returns sed commands or full files.
-- **Back up before destructive ops** with timestamped naming.
-- **Token-efficient responses** when iterating on code.
-- **Private vs supervisor-facing:** distinguish slides (Dr. Sammour) from design rationale (private).
-- **Watch the bash mistake:** `source X && source Y rosrun` → must be `&& rosrun`.
-
----
-
-## 18. Key References
-
-| Paper | Role in FYP |
+| Paper | Role |
 |---|---|
-| Sampedro et al., IROS 2018 | Founding paper of DRL+IBVS for multirotors. Defends hierarchical architecture. |
-| Tuncer & Alpdemir, Software Impacts 2023 | Closest published drone-to-drone PPO precedent. |
-| **Fu / Wu et al., Drones MDPI 2023** | **DRL tunes IBVS gain to prevent FOV loss. Citation for fuzzy gain scheduling of IBVS — the classical replacement for PPO's λ adopted at M9.6.** |
-| Jin et al., IEEE TIE 2022 | Policy-gradient visibility-preserving servo policies. Structurally similar. |
-| Pereira, MSc Técnico Lisboa 2021 | IBVS vs PBVS on monocular AR Drone — justifies monocular IBVS choice. |
-| Abdessameud & Janabi-Sharifi, Automatica 2015 | Lyapunov stability proof for IBVS on VTOL UAV. |
-| Chaumette & Hutchinson, IEEE RA Mag 2006/2007 | Foundational IBVS tutorial — core IBVS math. |
-| Lin et al., Actuators 2022 | PPO most stable continuous-action RL for quadrotor. |
-| Caffyn et al., Neurocomputing 2024 | Benchmarks 8 RL algorithms on quadcopter (PPO vs SAC vs TD3). |
-| Yi et al., IEEE T-IV 2025 | Safe RL + visual servoing for quadrotor tracking unknown targets. |
-| He et al., IEEE TIE 2024 | Hierarchical RL + VS with smooth subgoals — exact paradigm. |
+| Sampedro et al., IROS 2018 | Founding DRL+IBVS for multirotors |
+| Tuncer & Alpdemir, Software Impacts 2023 | Closest drone-to-drone PPO precedent |
+| Fu / Wu et al., Drones MDPI 2023 | Fuzzy gain scheduling of IBVS — citation for C1/C2 adaptive gain |
+| Jin et al., IEEE TIE 2022 | Policy-gradient visibility-preserving servo |
+| Pereira, MSc Técnico Lisboa 2021 | IBVS vs PBVS on monocular drone — justifies IBVS choice |
+| Luo et al., ICCV 2018 | A3C active tracking (discrete action — can't match speed) |
+| Zhang et al., 2022 | SAC raw-image → 2D velocity |
+| AgilePilot, 2025 | PPO+YOLO pose tracking |
+| Caffyn et al., Neurocomputing 2024 | Benchmarks PPO/SAC/TD3 on quadcopter |
+| He et al., IEEE TIE 2024 | Hierarchical RL + VS with smooth subgoals |
+| Chaumette & Hutchinson, IEEE RA Mag 2006/2007 | Foundational IBVS math |
 
-**Novelty statement:**
-> "This project builds on the drone-to-drone PPO tracking approach of Tuncer & Alpdemir (2023) by replacing end-to-end velocity regression with a hierarchical controller in which a higher-level policy supplies setpoints/gains to an IBVS inner loop, following the DRL-tunes-IBVS paradigm of Sampedro (2018), Jin (2022), and Wu/Fu (2023). At M9.6 the gain-adaptation layer is realized as Mamdani fuzzy gain scheduling (a classical, interpretable alternative to PPO). To the best of our knowledge, no published work combines YOLOv8 + Kalman + adaptive (fuzzy/PPO) gain + IBVS + PX4 on the drone-to-drone problem."
+**Novelty:** YOLOv8 + Kalman + RL policy (Config 3) vs YOLOv8 + Kalman + IBVS (Config 2) on drone-to-drone tracking — RL replaces the control block entirely; no published work combines this exact stack on this problem.

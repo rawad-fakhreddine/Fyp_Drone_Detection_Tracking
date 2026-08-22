@@ -1,0 +1,12 @@
+<launch>
+    <!-- Chaser MAVROS for nolockstep mode: uses node.launch directly so we can
+         override config_yaml to disable timesync (clock domains differ in nolockstep) -->
+    <include file="$(find mavros)/launch/node.launch">
+        <arg name="fcu_url"          value="udp://:14540@localhost:14557"/>
+        <arg name="gcs_url"          value=""/>
+        <arg name="tgt_system"       value="1"/>
+        <arg name="tgt_component"    value="1"/>
+        <arg name="pluginlists_yaml" value="$(find mavros)/launch/px4_pluginlists.yaml"/>
+        <arg name="config_yaml"      value="$(find drone_tracking)/config/px4_nolockstep.yaml"/>
+    </include>
+</launch>
