@@ -422,7 +422,10 @@ for _i in 1 2 3 4 5 6; do
 done
 sleep 3
 
-# T7 — IBVS
+# T7 — IBVS (skipped when SKIP_IBVS=1, e.g. for RL SAC training where rl_train_sac.py owns the setpoint)
+if [ "${SKIP_IBVS:-0}" = "1" ]; then
+    echo "[T7] IBVS SKIPPED (SKIP_IBVS=1 — RL policy owns the setpoint topic)"
+else
 echo "[T7] IBVS (use_ppo=$USE_PPO detection_source=$DET_SRC)..."
 rosrun drone_tracking ibvs_controller_node.py \
     _use_ppo:=$USE_PPO _detection_source:=$DET_SRC \
@@ -453,6 +456,7 @@ rosrun drone_tracking ibvs_controller_node.py \
     _pitch_comp:=${PITCH_COMP:-1.3} _deriv_lpf:=${DERIV_LPF:-0.6} \
     > /tmp/T7_${RUN_TAG}.log 2>&1 &
 sleep 2
+fi  # end SKIP_IBVS guard
 
 # T8 — PPO (config 3 only)
 if [ "$USE_PPO" = "true" ]; then
@@ -503,6 +507,9 @@ sleep 1
 # metric and biases against Config 1 (raw mode drops out more, recovers
 # slower); a 60 s abort is itself a recorded outcome (aborted=1 in summary).
 LOSS_TIMEOUT="${LOSS_TIMEOUT:-10}"
+# When IBVS is skipped (RL training mode) there is no SEARCH phase → disable the
+# loss watchdog (otherwise it fires in 10 s and aborts the training run).
+[ "${SKIP_IBVS:-0}" = "1" ] && LOSS_TIMEOUT=3600
 # Stuck-target watchdog: if the target's Gazebo world position stops changing
 # (hit a tree / terrain and wedged) for STUCK_TIMEOUT consecutive seconds, the
 # run is dead — abort. Only for MOVING trajectories (T1 is a static hover, so
