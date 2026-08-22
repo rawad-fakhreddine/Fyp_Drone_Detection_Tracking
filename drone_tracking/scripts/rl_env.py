@@ -410,12 +410,16 @@ if _GYM:
                     self._set_cmd(0, 0, 0, 0)
                     rospy.sleep(0.05)
             self._recover()
-            # If _recover() timed out with no detection, t_last_det=None → t_since_raw=999
-            # → step() immediately fires the "lost" terminal before the policy takes a step.
-            # Reset the timer to now so the first episode gets at least loss_secs to acquire.
-            if self.ob.t_last_det is None:
+            # Always reset the detection timer at episode start. Two failure modes:
+            # (1) t_last_det=None (never detected): t_since_raw=999 → instant "lost" terminal.
+            # (2) t_last_det=old (from prior episode that ended lost): episode 2+ starts
+            #     with t_since_raw already > loss_secs → 1-step episode loop.
+            # Resetting to now gives EVERY episode loss_secs wall-seconds to acquire.
+            _det_age = (float('inf') if self.ob.t_last_det is None
+                        else (rospy.Time.now() - self.ob.t_last_det).to_sec())
+            if _det_age > 1.0:
                 self.ob.t_last_det = rospy.Time.now()
-                rospy.logwarn("[rl_env] No detection after _recover — resetting t_last_det to now")
+                rospy.loginfo("[rl_env] reset t_last_det at episode start (was %.1fs old)", _det_age)
             self.ob.a_prev = np.zeros(4, dtype=np.float32)   # fresh smoothness baseline
             self._ep_t0 = rospy.Time.now()
             self._ep_steps = 0
