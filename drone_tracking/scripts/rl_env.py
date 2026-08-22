@@ -474,7 +474,8 @@ if _GYM:
                     yaw = self.ob.chaser_yaw
                     cy, sy = math.cos(yaw), math.sin(yaw)
                     if rng > 1e-3:
-                        mag = max(-1.5, min(1.5, 0.6 * (rng - d_star)))      # +approach / -back off
+                        # gain 1.5 + cap 4.0 m/s: fast enough to chase T4 orbit (2 m/s at 1× RTF)
+                        mag = max(-4.0, min(4.0, 1.5 * (rng - d_star)))     # +approach / -back off
                         vxw, vyw = mag * dx_w / rng, mag * dy_w / rng
                     else:
                         vxw = vyw = 0.0
@@ -486,8 +487,8 @@ if _GYM:
                     # wz: dbeta>0 → target is CCW from heading → LEFT turn → NED = -dbeta
                     vx_b =  cy * vxw + sy * vyw                              # forward (correct)
                     vy_b =  sy * vxw - cy * vyw                              # right  (FRD sign fix)
-                    vz   = max(-1.5, min(1.5, -0.8 * dz))                   # up=NED-neg (sign fix)
-                    wz   = max(-0.6, min(0.6, -1.2 * dbeta))                # CCW=NED-neg (sign fix)
+                    vz   = max(-2.5, min(2.5, -0.8 * dz))                   # up=NED-neg (sign fix)
+                    wz   = max(-1.0, min(1.0, -1.5 * dbeta))                # CCW=NED-neg (sign fix)
                     self._set_cmd(vx_b, vy_b, vz, wz)
                 else:
                     self._set_cmd(0, 0, 0, 0.4 if el > 1.0 else 0.0)        # no GT -> yaw scan
