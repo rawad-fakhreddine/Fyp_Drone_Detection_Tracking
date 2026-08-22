@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
-# rl_sac_train_launch.sh — one-shot SAC training launcher (Config 3, lockstep)
+# rl_sac_train_launch.sh — one-shot SAC training launcher (Config 3, nolockstep 4×)
 #
 # Usage:
-#   bash rl_sac_train_launch.sh [STEPS] [TRAJ] [SEED]
+#   SPEED_FACTOR=4 bash rl_sac_train_launch.sh [STEPS] [TRAJ] [SEED]
 #
-# Defaults: STEPS=30000  TRAJ=4 (orbit)  SEED=42
-#
-# Mode: LOCKSTEP (1× guaranteed RTF — faster than nolockstep 0.8× on this HW)
-#   Nolockstep at 4× setting only achieves 0.79× actual RTF (physics CPU-bound).
-#   Lockstep guarantees 1× RTF → 30k steps ≈ 25 min flight time + 3 min startup.
+# Defaults: STEPS=30000  TRAJ=4 (orbit)  SEED=42  SPEED_FACTOR=4
 #
 # What it does:
-#   1. Launches the full sim stack (lockstep, SKIP_IBVS=1, long DURATION)
+#   1. Launches the full sim stack (nolockstep 4×, SKIP_IBVS=1, long DURATION)
 #   2. Waits for both drones to be at altitude
 #   3. Starts rl_train_sac.py --scratch for STEPS env steps
 #   4. Cleans up the stack when SAC exits
@@ -19,6 +15,7 @@ set -e
 STEPS="${1:-30000}"
 TRAJ="${2:-4}"
 SEED="${3:-42}"
+SPEED_FACTOR="${SPEED_FACTOR:-4}"
 WORLD="${WORLD:-rl_empty}"
 
 source /opt/ros/noetic/setup.bash
@@ -28,17 +25,17 @@ SAC_SAVE="${SAC_SAVE:-~/fyp/rl/models/sac}"
 BC_PATH="${BC_PATH:-~/fyp/rl/models/bc_policy_v3.pth}"
 
 echo "================================================================"
-echo "  SAC Training | traj=$TRAJ seed=$SEED steps=$STEPS | lockstep 1× RTF"
+echo "  SAC Training | traj=$TRAJ seed=$SEED steps=$STEPS | ${SPEED_FACTOR}x nolockstep"
 echo "================================================================"
 
 LAUNCH_LOG="/tmp/rl_stack_$(date +%Y-%m-%d_%H-%M-%S).log"
 
-# --- T1: launch sim stack (lockstep, SKIP_IBVS=1, no LOSS watchdog, long DURATION) ---
-echo "[RL-T1] Launching sim stack (lockstep, SKIP_IBVS=1)..."
+# --- T1: launch sim stack (nolockstep, SKIP_IBVS=1, no LOSS watchdog, long DURATION) ---
+echo "[RL-T1] Launching sim stack (SKIP_IBVS=1, SPEED_FACTOR=${SPEED_FACTOR}x)..."
 nohup bash -c "
   source /opt/ros/noetic/setup.bash
   source /home/rawad/catkin_ws/devel/setup.bash
-  WORLD=$WORLD HEADLESS=1 VIEWER=0 \
+  WORLD=$WORLD HEADLESS=1 VIEWER=0 NO_LOCKSTEP=1 SPEED_FACTOR=$SPEED_FACTOR \
   SKIP_IBVS=1 LOSS_TIMEOUT=3600 DURATION=7200 \
   bash /home/rawad/catkin_ws/src/drone_tracking/scripts/launch_stack.sh 1 $TRAJ 1 $SEED 7200
 " > "$LAUNCH_LOG" 2>&1 &
