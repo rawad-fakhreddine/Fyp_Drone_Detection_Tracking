@@ -85,10 +85,12 @@ REWARD_DEFAULTS = dict(
     w_s=0.05, smooth_cap=1.0,  # smoothness −w_s·‖Δa‖², clipped to −smooth_cap
     w_approach=2.0, approach_cap=1.0,    # approach +w_approach·Δd when closing outside band, clip +approach_cap
     w_vel=0.05,                # anti-hover: small reward for any nonzero action magnitude
-    w_alt=0.25, alt_cap=4.0,   # altitude-match (GT, always-on): −w_alt·min(|cz−tz|,alt_cap). Pulls
-                               # the chaser to the TARGET'S altitude even when BLIND — the recovery
-                               # gradient vision (ey) can't give once the target leaves the frame.
-                               # Keeps the target vertically centred so it stays framable. Bounded [−1,0].
+    w_alt=0.0, alt_cap=4.0,    # altitude-match (GT, always-on): −w_alt·min(|cz−tz|,alt_cap).
+                               # DISABLED (w_alt=0, 2026-08-24): ey ALREADY carries the vertical
+                               # "target above/below" signal and is now vision-gated + rewarded via
+                               # centering, so ey should hold altitude on its own. Kept as a tunable
+                               # crutch: re-enable (w_alt≈0.25) ONLY if the ey-alone test shows the
+                               # policy still sinks (blind-recovery is the only thing ey can't do).
     P_lost=0.5,                # per-frame keep-in-view penalty (detection lost)
     d_min=2.0, P_safe=15.0,    # collision: d_true<d_min → terminal −P_safe (bounded; > loss terminal)
     loss_secs=5.0, P_lost_final=10.0,    # sustained loss>5s → terminal −P_lost_final
