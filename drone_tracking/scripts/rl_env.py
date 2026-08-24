@@ -554,6 +554,11 @@ if _GYM:
             lo, hi = self._rp['band_lo'], self._rp['band_hi']
             d_star = 0.5 * (lo + hi)
             SETTLE_DIST = 12.0   # accept "close enough" rather than in-band; YOLO detects ≤12m
+            SETTLE_MIN  = 5.5    # but NEVER settle inside near-collision range — retreat if closer.
+                                 # Without this, after a collision terminal (d≈2m) _recover saw
+                                 # 2<12 → "settled" → exited → step 1 re-collided → 1-step loop that
+                                 # deadlocked online training (685 collisions, ep_len≈5). Now a too-
+                                 # close start falls through to the reposition block (mag<0 → retreat).
             r = rospy.Rate(20); t0 = rospy.Time.now(); settle = 0
             while not rospy.is_shutdown():
                 el = (rospy.Time.now() - t0).to_sec()
@@ -568,9 +573,10 @@ if _GYM:
                     yaw = self.ob.chaser_yaw
                     dbeta = math.atan2(dy_w, dx_w) - yaw
                     dbeta = math.atan2(math.sin(dbeta), math.cos(dbeta))
-                    # wide settle: accept d < SETTLE_DIST (T4 orbit can't hold [5.5,7.5]m)
+                    # wide settle: accept SETTLE_MIN ≤ d < SETTLE_DIST (T4 orbit can't hold
+                    # [5.5,7.5]m). Too-close (d<SETTLE_MIN) is NOT framed → retreat below.
                     d_ref = td if not math.isnan(td) else rng
-                    framed_gt = (d_ref < SETTLE_DIST)
+                    framed_gt = (SETTLE_MIN <= d_ref < SETTLE_DIST)
                 else:
                     dbeta = 0.0; rng = float('nan'); framed_gt = False
                 framed = framed_gt or (self.ob.valid and not math.isnan(td)
