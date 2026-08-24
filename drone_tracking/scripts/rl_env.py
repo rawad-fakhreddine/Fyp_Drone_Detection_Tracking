@@ -84,7 +84,7 @@ REWARD_DEFAULTS = dict(
     band_pen_cap=1.0,          # ...clipped to −band_pen_cap so a far target can't drown out centering
     w_s=0.05, smooth_cap=1.0,  # smoothness −w_s·‖Δa‖², clipped to −smooth_cap
     w_approach=2.0, approach_cap=1.0,    # CASE 1 (far, d>band_hi): approach +w_approach·Δd for closing, clip +approach_cap
-    w_retreat=3.0, close_thresh=5.0, retreat_cap=1.0,   # CASE 2 (too close, d<close_thresh): GT-always
+    w_retreat=1.5, close_thresh=5.0, retreat_cap=1.0,   # CASE 2 (too close, d<close_thresh): GT-always
                                # safety term +w_retreat·(d−d_prev): REWARDS backing off, PENALISES
                                # continuing to close when already <5 m. Symmetric to approach; stops
                                # the hug-too-close/collision behaviour vx=4 exposed. Bounded ±retreat_cap.
