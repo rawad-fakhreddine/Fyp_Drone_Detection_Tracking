@@ -472,6 +472,13 @@ if __name__ == '__main__':
         if a.anchor:
             anchor = dict(ref=os.path.expanduser(a.anchor_ref), w0=a.bc_w0,
                           alpha=a.bc_alpha, anneal=a.bc_anneal)
+    if a.resume:
+        # RESUME loads the saved SAC checkpoint (weights + replay buffer), so a BC
+        # warm-start/anchor is both pointless (immediately overwritten by the load) and
+        # BROKEN: the default bc_policy_v3 is 64-dim (old frame-stack) while the current
+        # explicit-rate env is 14-dim (n_stack=1) → weight-copy crash. Force pure resume.
+        bc_path = None; anchor = None; prefill = False
+        print("[sac] RESUME: pure SAC continue from checkpoint (no warm-start/anchor/prefill)")
     rospy.init_node('rl_train_sac', anonymous=True)
     train(bc_path, a.steps, a.chunk, a.save, a.seed, a.resume,
           ent_coef=ec, prefill=prefill, critic_pretrain=a.critic_pretrain,
