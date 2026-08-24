@@ -60,47 +60,59 @@ OBS_NAMES = ["ex","ey","d_hat","dex","dey","dd","w","h","conf","t_nodet",
 OBS_DIM = len(OBS_NAMES)
 
 # Reward params (FYP/RL/reward/Reward_Design.docx). Defaults are START values, all
-# rosparam-overridable. Three review-driven choices are baked in here:
-#  (1) per-frame P_lost is small (0.5), NOT the doc's 10 (−200/s re-opened the
-#      "suicidal agent" trap); the real loss deterrent is the SUSTAINED-loss terminal.
-#  (2) collision penalty (P_safe=150) > sustained-loss terminal (P_lost_final=100):
-#      when a loss looks inevitable the agent must NEVER score better by RAMMING the
-#      target (−150) than by losing it (−100). This is the hard 2 m safety bar in
-#      reward form. (Original ordering was loss>collision — reversed in review because
-#      per-frame P_lost is now mild, so the suicide trap it guarded against is closed.)
-#  (3) the centering bonus (+A) is paid ONLY on a valid detection (see compute_reward),
-#      so a frozen (lost) frame can't collect the alive bonus. Living (a tracked step,
-#      +A) still dominates either terminal, so no suicide door reopens.
+# rosparam-overridable. Design principles baked in here:
+#  (1) BOUNDED, COMPARABLE SCALE (2026-08-24): every per-step term is clipped to ~[-1,1]
+#      so no single term dominates the critic's target. The OLD reward left the out-of-band
+#      distance penalty UNBOUNDED (−16.5/step at d=40 m) and terminals at −100/−150 (~100×
+#      the per-step scale) — that scale gap made Q-values hard to fit and stalled/degraded
+#      learning. Now per-step total ≈ [−2,+2]; terminals are the largest but only ~7× that.
+#      NB: this CHANGES reward semantics → a replay buffer built with the old reward must NOT
+#      be reused; train fresh (--scratch) after this change.
+#  (2) per-frame P_lost is small (0.5); the real loss deterrent is the SUSTAINED-loss terminal.
+#  (3) collision terminal (P_safe) > sustained-loss terminal (P_lost_final): when a loss looks
+#      inevitable the agent must NEVER score better by RAMMING (−P_safe) than by losing it
+#      (−P_lost_final). The 2 m safety bar in reward form.
+#  (4) the centering bonus (+A) is paid ONLY on a valid detection, so a frozen (lost) frame
+#      can't collect it. A tracked in-band step (+2) dominates either terminal.
 REWARD_DEFAULTS = dict(
-    A=1.0, sigma=0.3,          # centering (alive bonus): peaks +A when centered (valid only)
-    w_d=0.5, band_lo=6.0, band_hi=7.0,   # distance band: 0 inside [6,7] m, linear outside (GT)
-    w_s=0.05,                  # smoothness: −w_s·‖a_t−a_(t−1)‖²
-    w_approach=2.0,            # approach reward: +w_approach*(d_prev-d) when closing outside band
+    A=1.0, sigma=0.5,          # centering (valid only): exp bump in [0,1], peaks +A when centered.
+                               # sigma WIDENED 0.3→0.5 (2026-08-24 eval): at 0.3 the bump was ~0 for
+                               # |ex|>0.5, so a target drifting to the frame edge got NO pull-back
+                               # gradient before YOLO lost it (eval: 31% detection, mean|ex|=0.69).
+                               # 0.5 gives centering gradient across the whole frame.
+    w_d=0.5, band_lo=6.0, band_hi=7.0,   # band: +1 inside [6,7] m; linear penalty outside...
+    band_pen_cap=1.0,          # ...clipped to −band_pen_cap so a far target can't drown out centering
+    w_s=0.05, smooth_cap=1.0,  # smoothness −w_s·‖Δa‖², clipped to −smooth_cap
+    w_approach=2.0, approach_cap=1.0,    # approach +w_approach·Δd when closing outside band, clip +approach_cap
     w_vel=0.05,                # anti-hover: small reward for any nonzero action magnitude
     P_lost=0.5,                # per-frame keep-in-view penalty (detection lost)
-    d_min=2.0, P_safe=150.0,   # collision: d_true<d_min → terminal, −P_safe (> loss terminal)
-    loss_secs=5.0, P_lost_final=100.0,   # sustained loss>5s → terminal, −P_lost_final (supervisor 2026-08-18)
+    d_min=2.0, P_safe=15.0,    # collision: d_true<d_min → terminal −P_safe (bounded; > loss terminal)
+    loss_secs=5.0, P_lost_final=10.0,    # sustained loss>5s → terminal −P_lost_final
 )
 
 def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None):
     """Shaped reward + terminal flag. p = params dict (see REWARD_DEFAULTS). GT (d_true,
-    t_lost) is legal here — reward is training-only. Returns (reward, terminated, reason)."""
+    t_lost) is legal here — reward is training-only. Returns (reward, terminated, reason).
+    All per-step terms are BOUNDED to ~[-1,1] (2026-08-24) so the reward is on one scale."""
     # centering bonus is paid ONLY on a real detection — a frozen (lost) frame keeps
     # ex/ey at their last value, which must not earn the alive bonus.
     r_center = (p['A'] * math.exp(-(ex*ex + ey*ey) / (p['sigma']**2))) if valid else 0.0
+    # band: +1 inside [6,7]; bounded linear penalty outside (clipped to −band_pen_cap so a
+    # far target can't produce a huge negative that drowns out the centering signal).
+    bcap = p.get('band_pen_cap', 1.0)
     if math.isnan(d_true):        r_band = 0.0
-    elif d_true < p['band_lo']:   r_band = -p['w_d'] * (p['band_lo'] - d_true)
-    elif d_true > p['band_hi']:   r_band = -p['w_d'] * (d_true - p['band_hi'])
-    else:                         r_band = 1.0   # +1 inside [6,7]m (supervisor 2026-08-23)
-    # approach reward: positive signal for closing distance when outside band.
+    elif d_true < p['band_lo']:   r_band = max(-bcap, -p['w_d'] * (p['band_lo'] - d_true))
+    elif d_true > p['band_hi']:   r_band = max(-bcap, -p['w_d'] * (d_true - p['band_hi']))
+    else:                         r_band = 1.0
+    # approach: bounded positive signal for closing distance when outside band.
     r_approach = 0.0
     if (d_prev is not None and not math.isnan(d_true) and not math.isnan(d_prev)
             and d_true > p['band_hi']):
-        r_approach = p['w_approach'] * max(0.0, d_prev - d_true)
+        r_approach = min(p.get('approach_cap', 1.0), p['w_approach'] * max(0.0, d_prev - d_true))
     # anti-hover: tiny reward for any action magnitude — prevents collapse to zero-action hover.
     r_vel = p.get('w_vel', 0.0) * float(np.linalg.norm(np.asarray(a, dtype=np.float32)))
     da = np.asarray(a) - np.asarray(prev_a)
-    r_smooth = -p['w_s'] * float(np.dot(da, da))
+    r_smooth = max(-p.get('smooth_cap', 1.0), -p['w_s'] * float(np.dot(da, da)))
     r_lost = -p['P_lost'] if valid == 0 else 0.0
     reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost
     terminated = False; reason = ""

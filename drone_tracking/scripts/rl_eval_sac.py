@@ -50,7 +50,9 @@ def main():
         inf = info[0]
         steps += 1
         dists.append(inf.get('true_dist', float('nan')))
-        exs.append(abs(float(obs[0, -16]))); eys.append(abs(float(obs[0, -15])))
+        # ex,ey = first two of the NEWEST frame. Explicit-rate obs is 14-dim (OBS_DIM),
+        # so the newest frame starts at -14 (was -16 for the old 16-dim frame-stack layout).
+        exs.append(abs(float(obs[0, -14]))); eys.append(abs(float(obs[0, -13])))
         if steps % 40 == 0:
             d = np.array(dists[-40:], dtype=float)
             print(f"SAC-EVAL: t{rospy.get_time()-t0:5.1f}s  dist {np.nanmean(d):5.2f}"
