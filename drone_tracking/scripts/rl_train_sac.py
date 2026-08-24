@@ -338,7 +338,7 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
           gt_prefill_steps=3000):
     import rospy
     from stable_baselines3 import SAC
-    from stable_baselines3.common.callbacks import CheckpointCallback
+    from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 
     save_dir = os.path.expanduser(save_dir); os.makedirs(save_dir, exist_ok=True)
     model_path = os.path.join(save_dir, 'sac_policy')
@@ -404,8 +404,47 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
     ckpt = CheckpointCallback(save_freq=max(chunk_steps, 2000),
                               save_path=save_dir, name_prefix='sac_ckpt',
                               save_replay_buffer=True)
+
+    # ---- domain-metric TensorBoard logger (track/*) ----
+    # SB3 already logs rollout/ep_rew_mean, ep_len_mean, train/* losses. This adds the
+    # tracking metrics we care about (detection %, d_true stats, in-band/too-close %,
+    # collision/lost counts) so ALL progress is visible as curves, not just grepped.
+    from collections import deque as _deque
+    import numpy as _np
+    from rl_env import REWARD_DEFAULTS as _RD
+
+    class TBStats(BaseCallback):
+        def __init__(self, window=2000, every=500):
+            super().__init__()
+            self.d = _deque(maxlen=window); self.valid = _deque(maxlen=window)
+            self.n_coll = 0; self.n_lost = 0; self.every = every
+            self.lo = _RD['band_lo']; self.hi = _RD['band_hi']
+            self.close = _RD.get('close_thresh', 5.0)
+
+        def _on_step(self):
+            for inf in self.locals.get('infos', []):
+                dt = inf.get('true_dist', float('nan'))
+                if dt == dt:                       # not NaN
+                    self.d.append(dt)
+                self.valid.append(int(inf.get('valid', 0)))
+                r = inf.get('term_reason', '')
+                if r == 'collision':   self.n_coll += 1
+                elif r == 'lost':      self.n_lost += 1
+            if self.num_timesteps % self.every == 0 and len(self.d) > 0:
+                d = _np.asarray(self.d, dtype=float)
+                self.logger.record('track/detection_frac', float(_np.mean(self.valid)))
+                self.logger.record('track/d_true_mean', float(_np.mean(d)))
+                self.logger.record('track/d_true_min', float(_np.min(d)))
+                self.logger.record('track/d_true_max', float(_np.max(d)))
+                self.logger.record('track/in_band_frac',
+                                   float(_np.mean((d >= self.lo) & (d <= self.hi))))
+                self.logger.record('track/too_close_frac', float(_np.mean(d < self.close)))
+                self.logger.record('track/collisions_cum', self.n_coll)
+                self.logger.record('track/lost_cum', self.n_lost)
+            return True
+
     try:
-        model.learn(total_timesteps=total_steps, callback=ckpt,
+        model.learn(total_timesteps=total_steps, callback=[ckpt, TBStats()],
                     reset_num_timesteps=reset_num, progress_bar=False,
                     log_interval=1)   # dump TensorBoard scalars EVERY episode (fast feedback)
     finally:
