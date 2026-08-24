@@ -175,7 +175,11 @@ class ObsBuilder(object):
         # the recorded label is never leaked into the observation (see _run_record).
         self.a_prev = np.zeros(4, dtype=np.float32)
         self.latest_cmd = np.zeros(4, dtype=np.float32)
-        self.caps = np.array([float(rospy.get_param("~max_vx", 8.0)),
+        # max_vx LOWERED 8→4 (2026-08-24): the 8 m/s cap let the policy LUNGE forward and
+        # overshoot the standoff band (d_true swung 3–52 m, per-step stuck ~−0.22, occasional
+        # near-collisions), even though framing was solved. 4 m/s is still 2× the T4 target
+        # speed (2 m/s) so pursuit/reacquisition still works, but distance is finer to regulate.
+        self.caps = np.array([float(rospy.get_param("~max_vx", 4.0)),
                               float(rospy.get_param("~max_vy", 1.2)),
                               float(rospy.get_param("~max_vz", 2.5)),
                               float(rospy.get_param("~max_wz", 0.5))], dtype=np.float32)
