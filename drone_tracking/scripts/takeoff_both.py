@@ -39,6 +39,7 @@ Usage:
   rosrun drone_tracking takeoff_both.py
 """
 
+import os
 import rospy
 import math
 from mavros_msgs.msg import State, PositionTarget
@@ -53,13 +54,15 @@ LOCAL_VEL_MASK = (
     PositionTarget.IGNORE_YAW
 )
 
-TAKEOFF_ALT   = 14.0    # v9.9: was 10.0 — matches target_mover RISE_TO_Z=14m
+# Env-configurable for RL training (faster climb, shorter hover).
+# C1/C2 leave these unset → same conservative defaults as before.
+TAKEOFF_ALT   = float(os.environ.get('TAKEOFF_ALT',   '14.0'))
+MAX_CLIMB     = float(os.environ.get('MAX_CLIMB',      '0.8'))
+HOVER_HOLD_S  = float(os.environ.get('HOVER_HOLD_S',  '5.0'))
 ALT_TOLERANCE = 0.50
 CALM_DURATION = 2.0
 RAMP_DURATION = 1.5
-MAX_CLIMB     = 0.8
 XY_P_GAIN     = 0.6
-HOVER_HOLD_S  = 5.0
 CLIMB_TIMEOUT = 150.0   # v9.9: extended for 14m climb
 ARM_ATTEMPTS  = 40      # v10.0: ~20 s sim — outlasts EKF re-alignment after teleport
 

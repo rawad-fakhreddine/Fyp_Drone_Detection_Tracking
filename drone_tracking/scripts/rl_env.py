@@ -37,7 +37,7 @@ import rospy
 from geometry_msgs.msg import Point, Quaternion, PoseStamped
 from std_msgs.msg import String
 from mavros_msgs.msg import PositionTarget
-from mavros_msgs.srv import SetMode
+from mavros_msgs.srv import SetMode, CommandBool
 from gazebo_msgs.msg import ModelStates
 
 try:
@@ -75,12 +75,14 @@ REWARD_DEFAULTS = dict(
     A=1.0, sigma=0.3,          # centering (alive bonus): peaks +A when centered (valid only)
     w_d=0.5, band_lo=6.0, band_hi=7.0,   # distance band: 0 inside [6,7] m, linear outside (GT)
     w_s=0.05,                  # smoothness: −w_s·‖a_t−a_(t−1)‖²
+    w_approach=2.0,            # approach reward: +w_approach*(d_prev-d) when closing outside band
+    w_vel=0.05,                # anti-hover: small reward for any nonzero action magnitude
     P_lost=0.5,                # per-frame keep-in-view penalty (detection lost)
     d_min=2.0, P_safe=150.0,   # collision: d_true<d_min → terminal, −P_safe (> loss terminal)
     loss_secs=5.0, P_lost_final=100.0,   # sustained loss>5s → terminal, −P_lost_final (supervisor 2026-08-18)
 )
 
-def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost):
+def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None):
     """Shaped reward + terminal flag. p = params dict (see REWARD_DEFAULTS). GT (d_true,
     t_lost) is legal here — reward is training-only. Returns (reward, terminated, reason)."""
     # centering bonus is paid ONLY on a real detection — a frozen (lost) frame keeps
@@ -89,11 +91,18 @@ def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost):
     if math.isnan(d_true):        r_band = 0.0
     elif d_true < p['band_lo']:   r_band = -p['w_d'] * (p['band_lo'] - d_true)
     elif d_true > p['band_hi']:   r_band = -p['w_d'] * (d_true - p['band_hi'])
-    else:                         r_band = 0.0
+    else:                         r_band = 1.0   # +1 inside [6,7]m (supervisor 2026-08-23)
+    # approach reward: positive signal for closing distance when outside band.
+    r_approach = 0.0
+    if (d_prev is not None and not math.isnan(d_true) and not math.isnan(d_prev)
+            and d_true > p['band_hi']):
+        r_approach = p['w_approach'] * max(0.0, d_prev - d_true)
+    # anti-hover: tiny reward for any action magnitude — prevents collapse to zero-action hover.
+    r_vel = p.get('w_vel', 0.0) * float(np.linalg.norm(np.asarray(a, dtype=np.float32)))
     da = np.asarray(a) - np.asarray(prev_a)
     r_smooth = -p['w_s'] * float(np.dot(da, da))
     r_lost = -p['P_lost'] if valid == 0 else 0.0
-    reward = r_center + r_band + r_smooth + r_lost
+    reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost
     terminated = False; reason = ""
     if (not math.isnan(d_true)) and d_true < p['d_min']:
         reward -= p['P_safe']; terminated = True; reason = "collision"
@@ -141,6 +150,7 @@ class ObsBuilder(object):
         self.true_dist = float('nan')
         self.rel_w = (float('nan'), float('nan'), float('nan'))  # target−chaser, world XYZ
         self.chaser_yaw = 0.0                                    # chaser heading (world)
+        self.chaser_alt = 0.0                                    # chaser ENU z (m), for altitude safety
 
         rospy.Subscriber('/drone_tracking/target_center', Point, self._center_cb, queue_size=1)
         rospy.Subscriber('/drone_tracking/target_box', Quaternion, self._box_cb, queue_size=1)
@@ -187,6 +197,7 @@ class ObsBuilder(object):
             # GT relative vector (world) + chaser yaw — TRAINING-ONLY, used by _recover to
             # re-acquire a target lost in ANY direction (never enters the observation).
             self.rel_w = (t.x - c.x, t.y - c.y, t.z - c.z)
+            self.chaser_alt = float(c.z)
             q = m.pose[ic].orientation
             self.chaser_yaw = math.atan2(2.0*(q.w*q.z + q.x*q.y),
                                          1.0 - 2.0*(q.y*q.y + q.z*q.z))
@@ -219,9 +230,9 @@ class ObsBuilder(object):
             self.f_w, self.f_h = self.box_w, self.box_h
             conf = self.conf if not math.isnan(self.conf) else 0.0
         else:
-            # LOCKED dropout rule: freeze position features, zero rates, conf=0
-            self.dex = self.dey = self.dd = 0.0
-            self._prev = None
+            # Explicit-rate dropout (supervisor 2026-08-23): freeze rates at last known
+            # values instead of zeroing. Network retains last velocity direction during
+            # YOLO blackout. _prev kept so rates resume correctly on re-acquisition.
             conf = 0.0
 
         if self.t_last_det is None:
@@ -289,12 +300,13 @@ if _GYM:
             # target off-frame in every failed run; hovering during the kill removes it.
             self._first_reset = True
             self._handoff_wait = float(rospy.get_param("~handoff_wait", 6.0))
+            self._prev_d_true = float('nan')   # for approach reward
             # reward params (rosparam-overridable; defaults = REWARD_DEFAULTS)
             self._rp = {k: float(rospy.get_param("~rew_" + k, v))
                         for k, v in REWARD_DEFAULTS.items()}
             self.pub = rospy.Publisher('/mavros/setpoint_raw/local', PositionTarget, queue_size=1)
             self._msg = PositionTarget()
-            self._msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
+            self._msg.coordinate_frame = PositionTarget.FRAME_LOCAL_NED  # world-z avoids tilt-drift
             self._msg.type_mask = (PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY |
                                    PositionTarget.IGNORE_PZ | PositionTarget.IGNORE_AFX |
                                    PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
@@ -310,14 +322,12 @@ if _GYM:
             # self._msg (under the lock); the thread guarantees continuity.
             self._msg_lock = threading.Lock()
             self._alive = True
-            # keepalive stays SILENT until the first reset(): the env is often
-            # constructed while IBVS is still flying (e.g. during the seconds-long
-            # replay-buffer prefill before the handoff). If the keepalive published a
-            # hover setpoint during that window it would FIGHT the IBVS setpoints on the
-            # same topic — the first live run showed that contention slowly de-centering
-            # the target until IBVS lost it and flew off in SEARCH. So it only starts
-            # streaming once training actually begins and we hand control over.
-            self._ka_active = False
+            # RL always runs with SKIP_IBVS=1 — no IBVS on the setpoint topic.
+            # Start keepalive immediately so hover setpoints are published from env
+            # creation onward. Without this, the gap between takeoff_both.py exiting
+            # and reset() being called (~2-10s) causes PX4 to time out OFFBOARD and
+            # land the drone before a single training step runs.
+            self._ka_active = True
             self._ka = threading.Thread(target=self._keepalive, daemon=True)
             self._ka.start()
 
@@ -338,27 +348,78 @@ if _GYM:
                 self._msg.header.stamp = rospy.Time(0)  # Time(0) → MAVROS uses FCU time
                 self.pub.publish(self._msg)      # immediate; thread republishes between steps
 
+        def _set_world_cmd(self, vx_ned, vy_ned, vz_ned, wz):
+            """Publish a one-shot FRAME_LOCAL_NED setpoint (used by _recover only).
+            Bypasses EKF yaw dependency: _recover computes velocities in ENU world frame
+            and converts to NED; PX4 applies them directly without body→world rotation."""
+            m = PositionTarget()
+            m.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
+            m.type_mask = (PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY |
+                           PositionTarget.IGNORE_PZ | PositionTarget.IGNORE_AFX |
+                           PositionTarget.IGNORE_AFY | PositionTarget.IGNORE_AFZ |
+                           PositionTarget.IGNORE_YAW)
+            m.velocity.x = float(vx_ned); m.velocity.y = float(vy_ned)
+            m.velocity.z = float(vz_ned); m.yaw_rate = float(wz)
+            m.header.stamp = rospy.Time(0)
+            self.pub.publish(m)
+
         def close(self):
             self._alive = False
 
         def step(self, action):
             a = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
             prev_a = np.asarray(self.ob.a_prev, dtype=np.float32).copy()   # a_(t-1) for smoothness
+            d_prev = self._prev_d_true                                       # for approach reward
             v = a * self.ob.caps
-            self._set_cmd(v[0], v[1], v[2], v[3])
+            # Convert body-frame action → world LOCAL frame so vz is world-z (avoids tilt-drift).
+            # PROBE-VERIFIED 2026-08-24: setpoint_raw/local is ENU — velocity.x→world-x,
+            # velocity.y→world-y, velocity.z→Up. Map body (fwd=v[0], right=v[1]) to world;
+            # chaser_yaw is the ENU heading (CCW from world-x). The old code put the world-y
+            # component into velocity.x (x/y swapped) → chaser drove ~90° off, flew away.
+            yaw = self.ob.chaser_yaw
+            c_y, s_y = math.cos(yaw), math.sin(yaw)
+            vx_ned = v[0] * c_y + v[1] * s_y   # velocity.x (world-x) = fwd·cos + right·sin
+            vy_ned = v[0] * s_y - v[1] * c_y   # velocity.y (world-y) = fwd·sin − right·cos
+            # Altitude envelope [8m floor, 22m ceiling] — both clamp the policy action.
+            # SIGN CONVENTION (verified live 2026-08-24): /mavros/setpoint_raw/local is ENU
+            # on the ROS side — MAVROS converts ENU→NED internally, so vz POSITIVE = UP and
+            # vz NEGATIVE = DOWN. The old code assumed NED (positive=down) and inverted every
+            # altitude clamp: the ceiling forced vz=+2.5 to "descend" → drone climbed to 378 m.
+            ALT_FLOOR = 8.0
+            ALT_CEIL  = 22.0
+            alt = self.ob.chaser_alt
+            if alt < ALT_FLOOR:
+                climb = min(self.ob.caps[2], 1.5 * max(1.0, ALT_FLOOR - alt))    # +vz = UP
+                if v[2] < climb:
+                    v = v.copy(); v[2] = float(climb)
+                rospy.logwarn_throttle(2.0, "[rl_env] alt-floor: z=%.2fm forcing vz=%.2f", alt, v[2])
+            elif alt > ALT_CEIL:
+                descend = max(-self.ob.caps[2], -1.0 * max(1.0, alt - ALT_CEIL))  # -vz = DOWN
+                if v[2] > descend:
+                    v = v.copy(); v[2] = float(descend)
+                rospy.logwarn_throttle(2.0, "[rl_env] alt-ceiling: z=%.2fm forcing vz=%.2f", alt, v[2])
+            self._set_cmd(vx_ned, vy_ned, v[2], v[3])
             self.ob.a_prev = a                       # closed loop: a_prev = own action
             self._rate.sleep()                       # paced 20 Hz (absorbs gradient-step time)
             obs, raw = self.ob.build()
+            self._prev_d_true = raw['true_dist']     # update for next step
             self._ep_steps += 1
             elapsed = (rospy.Time.now() - self._ep_t0).to_sec() if self._ep_t0 else 0.0
             reward, terminated, reason = compute_reward(
                 self._rp, a, prev_a, float(obs[0]), float(obs[1]),
-                raw['true_dist'], raw['valid'], raw['t_since_raw'])
+                raw['true_dist'], raw['valid'], raw['t_since_raw'], d_prev=d_prev)
             truncated = (not terminated) and (elapsed >= self.max_episode_secs)  # Option A
+            if alt < 10.0:
+                rospy.logwarn_throttle(1.0, "[rl_env] LOW ALT in step: z=%.2fm vz_cmd=%.2f ep_step=%d",
+                                       alt, v[2], self._ep_steps)
+            if terminated or truncated:
+                # Stop any descending action before SB3's gradient step runs.
+                # The keepalive publishes the last _msg for the duration of learn(); hover avoids drift.
+                self._set_cmd(0, 0, 0, 0)
             if terminated:                        # diagnostic: which terminal + where
-                rospy.loginfo("[rl_env] TERMINAL %s after %d steps: d_true=%.2f t_lost=%.1f ex=%.2f ey=%.2f",
+                rospy.loginfo("[rl_env] TERMINAL %s after %d steps: d_true=%.2f t_lost=%.1f ex=%.2f ey=%.2f alt=%.2f",
                               reason, self._ep_steps, raw['true_dist'], raw['t_since_raw'],
-                              float(obs[0]), float(obs[1]))
+                              float(obs[0]), float(obs[1]), alt)
             raw['elapsed'] = elapsed; raw['ep_steps'] = self._ep_steps
             raw['reward'] = reward; raw['term_reason'] = reason
             return obs, reward, terminated, truncated, raw
@@ -421,33 +482,85 @@ if _GYM:
                 self.ob.t_last_det = rospy.Time.now()
                 rospy.loginfo("[rl_env] reset t_last_det at episode start (was %.1fs old)", _det_age)
             self.ob.a_prev = np.zeros(4, dtype=np.float32)   # fresh smoothness baseline
+            self._prev_d_true = float('nan')                  # reset approach reward baseline
             self._ep_t0 = rospy.Time.now()
             self._ep_steps = 0
             obs, raw = self.ob.build()
             return obs, raw
 
-        def _recover(self, timeout=90.0):
-            """Establish a STABLE, IN-BAND, CENTERED start before each episode (see reset()).
-            GT-DRIVEN (training-only scaffolding, never in the obs): drives the chaser to
-            band-centre range, matched altitude, and facing the target, then requires ~0.5 s
-            of stable framed frames. The old version yaw-scanned in place, which could NOT
-            recover a VERTICAL loss (target above the FOV) — that stalled the 2026-08-17
-            anchored run into 28 one-step losses. Using GT here re-acquires a loss in ANY
-            direction and guarantees every episode starts framed, so a transient loss during
-            learning is never permanent. Falls back to the hover/yaw-scan if GT is missing."""
+        def _rearm_and_takeoff(self, target_alt=14.0):
+            """Re-arm and climb back to target_alt using POSITION setpoints.
+
+            Velocity setpoints work from ground when armed+OFFBOARD (verified live).
+            The keepalive is already streaming at 20 Hz (_ka_active=True), so OFFBOARD
+            is already satisfied. Sequence: OFFBOARD → arm → climb velocity → wait.
+            """
+            rospy.logwarn("[rl_env] CRASH RECOVERY: chaser at alt=%.2fm — re-arming", self.ob.chaser_alt)
+            r = rospy.Rate(20)
+
+            # 1. Request OFFBOARD (keepalive is already streaming hover setpoints).
+            try:
+                set_mode = rospy.ServiceProxy('/mavros/set_mode', SetMode)
+                resp = set_mode(custom_mode='OFFBOARD')
+                rospy.loginfo("[rl_env] OFFBOARD re-request: mode_sent=%s", resp.mode_sent)
+            except Exception as e:
+                rospy.logwarn("[rl_env] OFFBOARD re-request failed: %s", e)
+
+            # 2. Arm.
+            try:
+                arm_srv = rospy.ServiceProxy('/mavros/cmd/arming', CommandBool)
+                resp = arm_srv(True)
+                rospy.loginfo("[rl_env] arm: success=%s", resp.success)
+            except Exception as e:
+                rospy.logwarn("[rl_env] arm failed: %s", e)
+
+            # 3. Climb: update keepalive msg to vz=+1.5 (ENU via MAVROS: positive = upward).
+            with self._msg_lock:
+                self._msg.velocity.x = 0.0
+                self._msg.velocity.y = 0.0
+                self._msg.velocity.z = 1.5
+                self._msg.yaw_rate = 0.0
+                self._msg.header.stamp = rospy.Time(0)
+
+            # 4. Wait for altitude (max 40 s).
+            t0 = rospy.Time.now()
+            while not rospy.is_shutdown() and (rospy.Time.now() - t0).to_sec() < 40.0:
+                if self.ob.chaser_alt >= target_alt - 2.0:
+                    rospy.loginfo("[rl_env] crash recovery done: alt=%.1fm", self.ob.chaser_alt)
+                    break
+                r.sleep()
+            else:
+                rospy.logwarn("[rl_env] crash recovery timed out; alt=%.1fm", self.ob.chaser_alt)
+
+            # 5. Hover.
+            with self._msg_lock:
+                self._msg.velocity.z = 0.0
+                self._msg.header.stamp = rospy.Time(0)
+
+        def _recover(self, timeout=15.0):
+            """Establish a YOLO-detectable start before each episode (see reset()).
+            GT-DRIVEN scaffolding: drives chaser to within 12 m of target (wide enough
+            to be achievable on T4 orbit at 2 m/s — the old [5.5,7.5]m band settle was
+            geometrically impossible on an orbiting target and caused every recovery to
+            time out, leaving the drone at d=15m pointing the wrong way).
+            Phase 2 yaw-aligns toward GT target and waits for YOLO confirmation (8s).
+            Falls back to hover/yaw-scan if GT is missing."""
+            # If drone crashed (altitude < 2m), re-arm and take off before proceeding.
+            if self.ob.chaser_alt < 2.0:
+                self._rearm_and_takeoff()
+            # Warn if we entered _recover() at a dangerously low altitude (crash investigation).
+            if self.ob.chaser_alt < 10.0:
+                rospy.logwarn("[rl_env] _recover entered at LOW alt=%.2fm — policy descended into floor", self.ob.chaser_alt)
             lo, hi = self._rp['band_lo'], self._rp['band_hi']
             d_star = 0.5 * (lo + hi)
+            SETTLE_DIST = 12.0   # accept "close enough" rather than in-band; YOLO detects ≤12m
             r = rospy.Rate(20); t0 = rospy.Time.now(); settle = 0
             while not rospy.is_shutdown():
                 el = (rospy.Time.now() - t0).to_sec()
                 if el > timeout:
-                    rospy.logwarn("[rl_env] _recover timed out (%.0fs); starting anyway", timeout)
-                    self._set_cmd(0, 0, 0, 0); return
+                    rospy.logwarn("[rl_env] _recover timed out (%.0fs); proceeding to yaw-align", timeout)
+                    break
                 td = self.ob.true_dist
-                # --- success gate: GT-primary (YOLO not required for recovery positioning).
-                # _recover() uses GT for navigation, so GT is authoritative for readiness.
-                # YOLO is unreliable at 4× speed (sparse rendering). Requiring it here caused
-                # the 90s timeout every episode. "Framed" = within band AND facing ±17°.
                 rel = self.ob.rel_w
                 if not any(math.isnan(v) for v in rel):
                     dx_w, dy_w, dz = rel
@@ -455,44 +568,78 @@ if _GYM:
                     yaw = self.ob.chaser_yaw
                     dbeta = math.atan2(dy_w, dx_w) - yaw
                     dbeta = math.atan2(math.sin(dbeta), math.cos(dbeta))
-                    framed_gt = (lo - 0.5 <= (td if not math.isnan(td) else rng) <= hi + 0.5
-                                 and abs(dbeta) < 0.3)
+                    # wide settle: accept d < SETTLE_DIST (T4 orbit can't hold [5.5,7.5]m)
+                    d_ref = td if not math.isnan(td) else rng
+                    framed_gt = (d_ref < SETTLE_DIST)
                 else:
                     dbeta = 0.0; rng = float('nan'); framed_gt = False
                 framed = framed_gt or (self.ob.valid and not math.isnan(td)
                                        and lo - 0.4 <= td <= hi + 0.4)
                 if framed:
                     self._set_cmd(0, 0, 0, 0); settle += 1
-                    if settle >= 10:                      # ~0.5 s stable → go
-                        return
+                    if settle >= 3:          # ~0.15 s at distance (reduced: yaw no longer gating)
+                        break
                     r.sleep(); continue
                 settle = 0
-                # --- GT reposition toward {band-centre range, matched altitude, facing} ---
-                # rel/dx_w/dy_w/dz/rng/yaw/dbeta already computed in framed gate above.
+                # --- GT reposition: LOCAL_NED via keepalive (correct fix) ---
+                # Must use LOCAL_NED so vz is always world-z regardless of drone tilt.
+                # Body-frame (BODY_NED) at 4 m/s forward causes ~15-20° bank → vz=0 in
+                # body frame has a downward world component → chaser descends and crashes.
+                # Approach: update _msg directly to LOCAL_NED so the keepalive thread
+                # continuously republishes the approach command (no cancellation).
                 if not any(math.isnan(v) for v in rel):
                     dx_w, dy_w, dz = rel
-                    yaw = self.ob.chaser_yaw
-                    cy, sy = math.cos(yaw), math.sin(yaw)
                     if rng > 1e-3:
-                        # gain 1.5 + cap 4.0 m/s: fast enough to chase T4 orbit (2 m/s at 1× RTF)
-                        mag = max(-4.0, min(4.0, 1.5 * (rng - d_star)))     # +approach / -back off
-                        vxw, vyw = mag * dx_w / rng, mag * dy_w / rng
+                        mag = max(-4.0, min(4.0, 1.5 * (rng - d_star)))
+                        vx_ned = mag * dx_w / rng   # velocity.x → world-x (dx_w); ENU probe-verified
+                        vy_ned = mag * dy_w / rng   # velocity.y → world-y (dy_w)
                     else:
-                        vxw = vyw = 0.0
-                    # ENU world → FRAME_BODY_NED (FRD: Forward=+x, Right=+y, Down=+z).
-                    # vx_b = projection onto forward (ENU yaw=0=East → forward=East)
-                    # vy_b = projection onto RIGHT (not left) → sign is +sy*vxw - cy*vyw
-                    #        NOT (-sy*vxw + cy*vyw) which is the FLU/left convention.
-                    # vz: target above (dz>0) → move UP → NED z = down → vz_NED = -0.8*dz
-                    # wz: dbeta>0 → target is CCW from heading → LEFT turn → NED = -dbeta
-                    vx_b =  cy * vxw + sy * vyw                              # forward (correct)
-                    vy_b =  sy * vxw - cy * vyw                              # right  (FRD sign fix)
-                    vz   = max(-2.5, min(2.5, -0.8 * dz))                   # up=NED-neg (sign fix)
-                    wz   = max(-1.0, min(1.0, -1.5 * dbeta))                # CCW=NED-neg (sign fix)
-                    self._set_cmd(vx_b, vy_b, vz, wz)
+                        vx_ned = vy_ned = 0.0
+                    vz_ned = max(-2.5, min(2.5, 0.8 * dz))   # ENU: +vz=UP; dz=ENU up → climb toward target
+                    # Altitude floor in _recover(): identical to the one in step().
+                    # Critical: without this, a chaser that DROPPED below target altitude keeps
+                    # sinking (vz toward target < 0) for the full 15-s timeout, crashing.
+                    _alt = self.ob.chaser_alt
+                    if _alt < 8.0:
+                        _climb = min(2.5, 1.5 * max(1.0, 8.0 - _alt))   # +vz = UP
+                        if vz_ned < _climb:
+                            vz_ned = _climb
+                            rospy.logwarn_throttle(2.0,
+                                "[rl_env] _recover alt-floor: z=%.2fm forcing vz_ned=%.2f",
+                                _alt, vz_ned)
+                    wz = max(-1.0, min(1.0, 1.5 * dbeta))   # ENU yaw_rate = CCW+; turn toward target
+                    with self._msg_lock:
+                        self._msg.coordinate_frame = PositionTarget.FRAME_LOCAL_NED
+                        self._msg.velocity.x = float(vx_ned)
+                        self._msg.velocity.y = float(vy_ned)
+                        self._msg.velocity.z = float(vz_ned)
+                        self._msg.yaw_rate = float(wz)
+                        self._msg.header.stamp = rospy.Time(0)
+                        self.pub.publish(self._msg)
                 else:
-                    self._set_cmd(0, 0, 0, 0.4 if el > 1.0 else 0.0)        # no GT -> yaw scan
+                    self._set_cmd(0, 0, 0, 0.4 if el > 1.0 else 0.0)
                 r.sleep()
+
+            # --- Phase 2: yaw-align + YOLO wait (max 5s) ---
+            yaw_t0 = rospy.Time.now()
+            while not rospy.is_shutdown() and (rospy.Time.now() - yaw_t0).to_sec() < 5.0:
+                if self.ob.valid:
+                    rospy.loginfo("[rl_env] _recover: YOLO confirmed after yaw-align")
+                    break
+                rel = self.ob.rel_w
+                if not any(math.isnan(v) for v in rel):
+                    dx_w, dy_w, _ = rel
+                    yaw = self.ob.chaser_yaw
+                    dbeta = math.atan2(dy_w, dx_w) - yaw
+                    dbeta = math.atan2(math.sin(dbeta), math.cos(dbeta))
+                    wz = max(-1.0, min(1.0, 1.5 * dbeta))   # ENU yaw_rate = CCW+; turn toward target
+                    self._set_cmd(0, 0, 0, wz)   # yaw only
+                else:
+                    self._set_cmd(0, 0, 0, 0.4)  # no GT → slow spin
+                r.sleep()
+            if not self.ob.valid:
+                rospy.logwarn("[rl_env] _recover: YOLO not detecting after yaw-align; starting anyway")
+            self._set_cmd(0, 0, 0, 0)   # LOCAL_NED zeros = world-frame hover
 
 
 # --------------------------- policy runner (Step 2) ---------------------------

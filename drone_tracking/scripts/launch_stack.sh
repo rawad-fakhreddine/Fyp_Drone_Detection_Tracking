@@ -82,10 +82,22 @@ wait_topic() {
 # takeoff_ready is a latched std_msgs/Bool advertised at node start (exists
 # immediately) but only published True once both drones reach altitude.
 wait_bool_true() {   # wait_bool_true TOPIC TIMEOUT
+    # Uses a Python rospy subscriber — more reliable than rostopic|grep when
+    # use_sim_time=false (nolockstep), where rostopic echo -n1 can fail to
+    # deliver latched messages after the publisher node has exited.
     local topic="$1" timeout="${2:-90}"
     echo -n "  Waiting for $topic == True ."
-    if timeout "$timeout" bash -c \
-       "until rostopic echo -n1 $topic 2>/dev/null | grep -q 'data: True'; do sleep 1; echo -n .; done"; then
+    if timeout "$timeout" python3 - "$topic" "$timeout" <<'PYEOF'
+import sys, rospy
+from std_msgs.msg import Bool
+rospy.init_node('wait_bool_true', anonymous=True)
+try:
+    msg = rospy.wait_for_message(sys.argv[1], Bool, timeout=float(sys.argv[2]))
+    sys.exit(0 if msg.data else 1)
+except rospy.ROSException:
+    sys.exit(1)
+PYEOF
+    then
         echo " OK"; return 0
     else echo " TIMEOUT"; return 1; fi
 }
@@ -195,7 +207,19 @@ if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
     roslaunch $PKG_DIR/launch/chaser_mavros_nolockstep.launch \
         > /tmp/T1b_${RUN_TAG}.log 2>&1 &
 else
-    # LOCKSTEP (C1/C2 default): combined launch, unchanged behaviour
+    # LOCKSTEP (C1/C2 default): combined launch, unchanged behaviour.
+    # Clear chaser eeprom so PX4 boots with GPS defaults (EKF2_AID_MASK=1, HGT_MODE=0).
+    # Root cause: nolockstep sessions write EKF2_AID_MASK=264 (EV-only) to eeprom via
+    # mavparam. In lockstep, no vision pose is published, so EKF2 starts blind → position
+    # invalid → OFFBOARD switch fails → ARM denied ("manual control lost"). The runtime
+    # mavparam restore (below) only writes the new value to eeprom for the NEXT boot;
+    # it does NOT hot-reload the already-running EKF2 instance. Clearing the eeprom
+    # BEFORE PX4 starts is the only reliable fix.
+    _CHASER_EEPROM="$HOME/.ros/eeprom/parameters_10016"
+    if [ -f "$_CHASER_EEPROM" ]; then
+        rm -f "$_CHASER_EEPROM"
+        echo "  Cleared chaser eeprom (GPS defaults on boot, no EV poison)"
+    fi
     echo "[T1] Gazebo + Chaser PX4 + MAVROS (world=$(basename $WORLD_PATH)  lockstep=1)..."
     roslaunch $PX4_HOME/launch/mavros_posix_sitl.launch \
         vehicle:=iris \
@@ -207,12 +231,42 @@ else
         use_sim_time:=true \
         > /tmp/T1_${RUN_TAG}.log 2>&1 &
 fi
+# Pin gzserver to P-core threads (0-7 on i5-13420H; 8-11 are E-cores) to keep the
+# single-threaded ODE physics loop off the slower E-cores. Scheduling-only — does
+# not change lockstep results. Gated to the RL world so C1/C2 baseline runs (baylands)
+# are byte-for-byte untouched.
+if [ "${WORLD:-}" = "rl_empty" ]; then
+    for _i in $(seq 1 20); do
+        _GZ_PID=$(pgrep -x gzserver 2>/dev/null | head -1 || true)
+        [ -n "$_GZ_PID" ] && break || sleep 1
+    done
+    if [ -n "${_GZ_PID:-}" ]; then
+        taskset -cp 0-7 "$_GZ_PID" >/dev/null 2>&1 \
+            && echo "  gzserver (PID=$_GZ_PID) pinned to P-core threads 0-7" || true
+    fi
+fi
 wait_topic "/mavros/state" 60 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1; }
 # Gate: chaser PX4 alive and linked to MAVROS (= baylands fully loaded and the
 # sim stepping) BEFORE the zone teleport — topic existence alone fires ~30 s
 # too early, while the world is still loading.
 wait_fcu "/mavros/state" 90 || { bash $PKG_DIR/scripts/cleanup.sh; exit 1; }
 sleep 5
+# EKF restore: nolockstep sessions bake EKF2_AID_MASK=264 (EV-only, no GPS) and
+# EKF2_HGT_MODE=3 (vision height) into the chaser eeprom. In lockstep, no vision
+# pose is published → EKF blind → local_position_valid=false → OFFBOARD fails →
+# PX4 stays STABILIZED → ARM denied "manual control lost". Restore GPS defaults.
+if [ "${NO_LOCKSTEP:-0}" != "1" ]; then
+    for _i in 1 2 3; do
+        timeout 10 rosrun mavros mavparam set EKF2_AID_MASK 1 >/dev/null 2>&1 \
+            && echo "  chaser EKF2_AID_MASK=1 (GPS, lockstep restore)" && break \
+            || sleep 3
+    done
+    for _i in 1 2 3; do
+        timeout 10 rosrun mavros mavparam set EKF2_HGT_MODE 0 >/dev/null 2>&1 \
+            && echo "  chaser EKF2_HGT_MODE=0 (baro, lockstep restore)" && break \
+            || sleep 3
+    done
+fi
 
 # T2 — Spawn target + teleport chaser
 # START_DIST overrides the spawn separation (default -1 → node picks 8-12m)
@@ -407,6 +461,18 @@ if [ "${NO_LOCKSTEP:-0}" = "1" ]; then
     echo "[T6b] Vision GT bridge (Gazebo GT → EKF2 vision fusion)..."
     rosrun drone_tracking gz_gt_to_vision.py > /tmp/T6b_${RUN_TAG}.log 2>&1 &
     sleep 2
+else
+    # Restore target EKF to GPS defaults (same eeprom-poison risk as chaser)
+    for _i in 1 2 3; do
+        timeout 10 rosrun mavros mavparam -n /target/mavros set EKF2_AID_MASK 1 >/dev/null 2>&1 \
+            && echo "  target EKF2_AID_MASK=1 (GPS, lockstep restore)" && break \
+            || sleep 3
+    done
+    for _i in 1 2 3; do
+        timeout 10 rosrun mavros mavparam -n /target/mavros set EKF2_HGT_MODE 0 >/dev/null 2>&1 \
+            && echo "  target EKF2_HGT_MODE=0 (baro, lockstep restore)" && break \
+            || sleep 3
+    done
 fi
 # CHASER descent cap (T6/T7/T8 vertical trajectories ONLY, env-gated:
 # CHASER_ZDN=2.5). NOT unconditional: the 2026-07-11 regression-gate failure

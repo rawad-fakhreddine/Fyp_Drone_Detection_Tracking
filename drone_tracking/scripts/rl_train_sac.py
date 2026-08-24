@@ -169,6 +169,69 @@ def _make_sacbc(bc_ref, bc_w0, bc_alpha, anneal, zero_aprev_ref=True):
     return SACBC
 
 
+def _gt_action(ob):
+    """GT-heuristic action in [-1,1]: approach target at d=6.5m using world position."""
+    import math as _math
+    rel = ob.rel_w; yaw = ob.chaser_yaw; caps = ob.caps
+    if any(_math.isnan(v) for v in rel):
+        return np.zeros(4, dtype=np.float32)
+    dx_w, dy_w, dz_w = rel           # ENU world: dx=East, dy=North, dz=Up
+    rng_xy = _math.hypot(dx_w, dy_w)
+    d_star  = 6.5
+    if rng_xy > 0.1:
+        ue, un = dx_w / rng_xy, dy_w / rng_xy
+        # ENU→body FRD: yaw measured CCW from East
+        fwd_unit   =  ue * _math.cos(yaw) + un * _math.sin(yaw)
+        right_unit =  ue * _math.sin(yaw) - un * _math.cos(yaw)
+        speed = max(-4.0, min(4.0, 1.5 * (rng_xy - d_star)))
+        vx = speed * fwd_unit;  vy = speed * right_unit
+    else:
+        vx = vy = 0.0
+    vz = max(-2.5, min(2.5, 0.8 * dz_w))   # ENU via MAVROS: +vz=UP; dz_w=ENU up → climb toward target
+    wz = 0.0
+    if rng_xy > 0.5:
+        tgt_yaw = _math.atan2(dy_w, dx_w)
+        dyaw    = _math.atan2(_math.sin(tgt_yaw - yaw), _math.cos(tgt_yaw - yaw))
+        # PROBE-VERIFIED 2026-08-24: setpoint_raw/local yaw_rate is ENU (CCW positive).
+        # dyaw>0 (target to left/CCW) needs a CCW turn = POSITIVE yaw_rate.
+        wz      = max(-1.0, min(1.0, 1.5 * dyaw))
+    return np.clip([vx/caps[0], vy/caps[1], vz/caps[2], wz/caps[3]],
+                   -1.0, 1.0).astype(np.float32)
+
+
+def gt_prefill_live(model, venv, n_steps=3000):
+    """Fill replay buffer with GT-heuristic approach transitions before SAC training.
+
+    Runs N steps using the GT position vector to command approach to 6.5 m, storing
+    each transition in the SB3 replay buffer.  No SAC gradients — the policy is not
+    used.  This gives the critic real 'approach→detect→reward' examples so training
+    can start from a useful prior instead of the random hover the policy produces.
+    """
+    # unwrap VecMonitor → DummyVecEnv → DroneTrackingEnv
+    inner = venv
+    while hasattr(inner, 'venv'):
+        inner = inner.venv
+    raw_env = inner.envs[0]
+
+    obs = venv.reset()
+    added = 0
+    print(f"[sac] GT-prefill: collecting {n_steps} steps with GT approach controller...")
+    for _ in range(n_steps):
+        action_np  = _gt_action(raw_env.ob)          # (4,) in [-1,1]
+        action_b   = action_np[None].astype(np.float32)  # (1,4)
+        new_obs, rewards, dones, infos = venv.step(action_b)
+        model.replay_buffer.add(
+            obs.astype(np.float32), new_obs.astype(np.float32),
+            action_b, rewards.reshape(-1).astype(np.float32),
+            dones.reshape(-1),
+            [{'TimeLimit.truncated': bool(infos[0].get('TimeLimit.truncated', False))}])
+        obs = new_obs
+        added += 1
+    print(f"[sac] GT-prefill done: {added} transitions in buffer "
+          f"(size={model.replay_buffer.size()})")
+    return added
+
+
 def prefill_from_logs(model, src='~/fyp/Results/Config1', since='2026-08-06',
                       until='2026-08-16', cap=120_000):
     """Seed the replay buffer with IBVS transitions so the CRITIC learns real Q-values
@@ -223,7 +286,7 @@ def prefill_from_logs(model, src='~/fyp/Results/Config1', since='2026-08-06',
 
 
 def build(bc_path=None, seed=0, tb=True, ent_coef=0.02, anchor=None, log_std=-3.0, n_stack=1,
-          train_freq=1, gradient_steps=1, batch_size=512):
+          train_freq=1, gradient_steps=1, batch_size=512, episode_secs=25.0):
     import rospy, torch
     from stable_baselines3 import SAC
     from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecMonitor
@@ -231,7 +294,8 @@ def build(bc_path=None, seed=0, tb=True, ent_coef=0.02, anchor=None, log_std=-3.
 
     # n_stack=1 == EXPLICIT-RATE observation (no frame-stacking; rates carry the
     # temporal info) — the 2026-08-18 supervisor design. n_stack>1 restores stacking.
-    venv = VecFrameStack(DummyVecEnv([lambda: DroneTrackingEnv()]), n_stack=n_stack)
+    _ep = episode_secs
+    venv = VecFrameStack(DummyVecEnv([lambda: DroneTrackingEnv(episode_secs=_ep)]), n_stack=n_stack)
     venv = VecMonitor(venv)                       # logs ep_rew_mean / ep_len_mean
 
     # ent_coef: FIXED small (default 0.05), NOT SB3's "auto". The first live run showed
@@ -240,7 +304,7 @@ def build(bc_path=None, seed=0, tb=True, ent_coef=0.02, anchor=None, log_std=-3.
     # collapsed +278 -> -268). A fixed small coef keeps exploration GENTLE around the
     # cloned policy; the critic prefill (below) supplies the improvement signal instead.
     kw = dict(learning_rate=3e-4, buffer_size=200_000, batch_size=batch_size,
-              learning_starts=0,                  # warm actor flies from step 1 (see header)
+              learning_starts=0,                  # GT-prefill warms buffer; no random exploration
               train_freq=train_freq, gradient_steps=gradient_steps, tau=0.005, gamma=0.99,
               ent_coef=ent_coef,
               policy_kwargs=dict(net_arch=[256, 256]),  # matches BCPolicy dims
@@ -270,7 +334,8 @@ def build(bc_path=None, seed=0, tb=True, ent_coef=0.02, anchor=None, log_std=-3.
 
 def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.02,
           prefill=True, critic_pretrain=10_000, anchor=None, log_std=-3.0, n_stack=1,
-          train_freq=1, gradient_steps=1, batch_size=512):
+          train_freq=1, gradient_steps=1, batch_size=512, episode_secs=25.0,
+          gt_prefill_steps=3000):
     import rospy
     from stable_baselines3 import SAC
     from stable_baselines3.common.callbacks import CheckpointCallback
@@ -281,7 +346,8 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
 
     model, venv = build(bc_path, seed=seed, tb=True, ent_coef=ent_coef, anchor=anchor,
                         log_std=log_std, n_stack=n_stack, train_freq=train_freq,
-                        gradient_steps=gradient_steps, batch_size=batch_size)
+                        gradient_steps=gradient_steps, batch_size=batch_size,
+                        episode_secs=episode_secs)
     reset_num = True
     if resume and os.path.exists(model_path + '.zip'):
         # resume: reload weights + replay buffer onto the freshly-built env
@@ -301,6 +367,12 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
             model.load_replay_buffer(buf_path)
             print(f"[sac] replay buffer restored ({model.replay_buffer.size()} transitions)")
         reset_num = False
+    elif not resume and not prefill:
+        # SCRATCH mode: GT-heuristic prefill — approach target using GT position to
+        # seed the buffer with 'approach→detect→reward' transitions before SAC training.
+        # Random-action exploration (learning_starts>0) fails because vx_cap=8m/s flies
+        # the drone 40m away in 5s, filling the buffer with only loss-timeout episodes.
+        gt_prefill_live(model, venv, n_steps=gt_prefill_steps)
     elif prefill:
         # fresh run: warm the critic on IBVS transitions BEFORE any online step.
         # CRITICAL (live-run lesson): filling the buffer is NOT enough — without the
@@ -381,6 +453,10 @@ if __name__ == '__main__':
                     help='gradient updates per train_freq cycle (default 1). >1 uses GPU more per env-step; SAC supports high update-to-data ratios')
     ap.add_argument('--batch-size', type=int, default=512,
                     help='SAC replay buffer batch size per gradient step (default 512, up from 256 for better GPU utilization)')
+    ap.add_argument('--episode-secs', type=float, default=25.0,
+                    help='max seconds per episode (truncation). 25=one T4 orbit, 40=1.5 orbits')
+    ap.add_argument('--gt-prefill-steps', type=int, default=3000,
+                    help='GT-heuristic prefill steps for --scratch (default 3000 ~150s; use a small value for a quick smoke test)')
     # rosrun passes _params:=; strip them so argparse doesn't choke
     import sys
     argv = [a for a in sys.argv[1:] if not a.startswith('_') and ':=' not in a]
@@ -400,4 +476,5 @@ if __name__ == '__main__':
     train(bc_path, a.steps, a.chunk, a.save, a.seed, a.resume,
           ent_coef=ec, prefill=prefill, critic_pretrain=a.critic_pretrain,
           anchor=anchor, log_std=a.log_std, n_stack=a.n_stack, train_freq=a.train_freq,
-          gradient_steps=a.gradient_steps, batch_size=a.batch_size)
+          gradient_steps=a.gradient_steps, batch_size=a.batch_size,
+          episode_secs=a.episode_secs, gt_prefill_steps=a.gt_prefill_steps)
