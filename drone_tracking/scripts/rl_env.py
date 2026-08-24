@@ -83,7 +83,11 @@ REWARD_DEFAULTS = dict(
     w_d=0.5, band_lo=6.0, band_hi=7.0,   # band: +1 inside [6,7] m; linear penalty outside...
     band_pen_cap=1.0,          # ...clipped to −band_pen_cap so a far target can't drown out centering
     w_s=0.05, smooth_cap=1.0,  # smoothness −w_s·‖Δa‖², clipped to −smooth_cap
-    w_approach=2.0, approach_cap=1.0,    # approach +w_approach·Δd when closing outside band, clip +approach_cap
+    w_approach=2.0, approach_cap=1.0,    # CASE 1 (far, d>band_hi): approach +w_approach·Δd for closing, clip +approach_cap
+    w_retreat=3.0, close_thresh=5.0, retreat_cap=1.0,   # CASE 2 (too close, d<close_thresh): GT-always
+                               # safety term +w_retreat·(d−d_prev): REWARDS backing off, PENALISES
+                               # continuing to close when already <5 m. Symmetric to approach; stops
+                               # the hug-too-close/collision behaviour vx=4 exposed. Bounded ±retreat_cap.
     w_vel=0.05,                # anti-hover: small reward for any nonzero action magnitude
     w_alt=0.0, alt_cap=4.0,    # altitude-match (GT, always-on): −w_alt·min(|cz−tz|,alt_cap).
                                # DISABLED (w_alt=0, 2026-08-24): ey ALREADY carries the vertical
@@ -135,7 +139,16 @@ def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None, alt
     r_alt = 0.0
     if alt_gap is not None and not math.isnan(alt_gap):
         r_alt = -p.get('w_alt', 0.0) * min(abs(alt_gap), p.get('alt_cap', 4.0))
-    reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost + r_alt
+    # CASE 2 — too-close retreat (GT, ALWAYS-ON, safety): when d_true < close_thresh, reward the
+    # signed distance change (d−d_prev): POSITIVE when opening (backing off), NEGATIVE when still
+    # closing. Symmetric counterpart to the (far) approach term; teaches the policy to slow/reverse
+    # before it collides. GT-always so it works even blind (safety must not need detection).
+    r_retreat = 0.0
+    if (d_prev is not None and not math.isnan(d_true) and not math.isnan(d_prev)
+            and d_true < p.get('close_thresh', 5.0)):
+        rcap = p.get('retreat_cap', 1.0)
+        r_retreat = max(-rcap, min(rcap, p.get('w_retreat', 0.0) * (d_true - d_prev)))
+    reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost + r_alt + r_retreat
     terminated = False; reason = ""
     if (not math.isnan(d_true)) and d_true < p['d_min']:
         reward -= p['P_safe']; terminated = True; reason = "collision"   # GT safety, even if blind
