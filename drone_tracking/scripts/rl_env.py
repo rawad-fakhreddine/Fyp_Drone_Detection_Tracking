@@ -85,12 +85,16 @@ REWARD_DEFAULTS = dict(
     w_s=0.05, smooth_cap=1.0,  # smoothness −w_s·‖Δa‖², clipped to −smooth_cap
     w_approach=2.0, approach_cap=1.0,    # approach +w_approach·Δd when closing outside band, clip +approach_cap
     w_vel=0.05,                # anti-hover: small reward for any nonzero action magnitude
+    w_alt=0.25, alt_cap=4.0,   # altitude-match (GT, always-on): −w_alt·min(|cz−tz|,alt_cap). Pulls
+                               # the chaser to the TARGET'S altitude even when BLIND — the recovery
+                               # gradient vision (ey) can't give once the target leaves the frame.
+                               # Keeps the target vertically centred so it stays framable. Bounded [−1,0].
     P_lost=0.5,                # per-frame keep-in-view penalty (detection lost)
     d_min=2.0, P_safe=15.0,    # collision: d_true<d_min → terminal −P_safe (bounded; > loss terminal)
     loss_secs=5.0, P_lost_final=10.0,    # sustained loss>5s → terminal −P_lost_final
 )
 
-def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None):
+def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None, alt_gap=None):
     """Shaped reward + terminal flag. p = params dict (see REWARD_DEFAULTS). GT (d_true,
     t_lost) is legal here — reward is training-only. Returns (reward, terminated, reason).
 
@@ -124,7 +128,12 @@ def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None):
     da = np.asarray(a) - np.asarray(prev_a)
     r_smooth = max(-p.get('smooth_cap', 1.0), -p['w_s'] * float(np.dot(da, da)))
     r_lost = -p['P_lost'] if valid == 0 else 0.0
-    reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost
+    # altitude-match (GT, ALWAYS-ON incl. blind): the recovery gradient that pulls the chaser
+    # back to the target's altitude so the target re-enters the frame. alt_gap = |cz − tz|.
+    r_alt = 0.0
+    if alt_gap is not None and not math.isnan(alt_gap):
+        r_alt = -p.get('w_alt', 0.0) * min(abs(alt_gap), p.get('alt_cap', 4.0))
+    reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost + r_alt
     terminated = False; reason = ""
     if (not math.isnan(d_true)) and d_true < p['d_min']:
         reward -= p['P_safe']; terminated = True; reason = "collision"   # GT safety, even if blind
@@ -430,9 +439,12 @@ if _GYM:
             self._prev_d_true = raw['true_dist']     # update for next step
             self._ep_steps += 1
             elapsed = (rospy.Time.now() - self._ep_t0).to_sec() if self._ep_t0 else 0.0
+            # altitude gap = |target_z − chaser_z| from GT rel vector (training-only reward input)
+            _rz = self.ob.rel_w[2]
+            _alt_gap = abs(_rz) if not math.isnan(_rz) else None
             reward, terminated, reason = compute_reward(
                 self._rp, a, prev_a, float(obs[0]), float(obs[1]),
-                raw['true_dist'], raw['valid'], raw['t_since_raw'], d_prev=d_prev)
+                raw['true_dist'], raw['valid'], raw['t_since_raw'], d_prev=d_prev, alt_gap=_alt_gap)
             truncated = (not terminated) and (elapsed >= self.max_episode_secs)  # Option A
             if alt < 10.0:
                 rospy.logwarn_throttle(1.0, "[rl_env] LOW ALT in step: z=%.2fm vz_cmd=%.2f ep_step=%d",
