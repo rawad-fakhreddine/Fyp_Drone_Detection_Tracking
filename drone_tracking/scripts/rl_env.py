@@ -93,23 +93,33 @@ REWARD_DEFAULTS = dict(
 def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None):
     """Shaped reward + terminal flag. p = params dict (see REWARD_DEFAULTS). GT (d_true,
     t_lost) is legal here — reward is training-only. Returns (reward, terminated, reason).
-    All per-step terms are BOUNDED to ~[-1,1] (2026-08-24) so the reward is on one scale."""
-    # centering bonus is paid ONLY on a real detection — a frozen (lost) frame keeps
-    # ex/ey at their last value, which must not earn the alive bonus.
-    r_center = (p['A'] * math.exp(-(ex*ex + ey*ey) / (p['sigma']**2))) if valid else 0.0
-    # band: +1 inside [6,7]; bounded linear penalty outside (clipped to −band_pen_cap so a
-    # far target can't produce a huge negative that drowns out the centering signal).
-    bcap = p.get('band_pen_cap', 1.0)
-    if math.isnan(d_true):        r_band = 0.0
-    elif d_true < p['band_lo']:   r_band = max(-bcap, -p['w_d'] * (p['band_lo'] - d_true))
-    elif d_true > p['band_hi']:   r_band = max(-bcap, -p['w_d'] * (d_true - p['band_hi']))
-    else:                         r_band = 1.0
-    # approach: bounded positive signal for closing distance when outside band.
-    r_approach = 0.0
-    if (d_prev is not None and not math.isnan(d_true) and not math.isnan(d_prev)
-            and d_true > p['band_hi']):
-        r_approach = min(p.get('approach_cap', 1.0), p['w_approach'] * max(0.0, d_prev - d_true))
-    # anti-hover: tiny reward for any action magnitude — prevents collapse to zero-action hover.
+
+    VISION-FIRST (2026-08-24 root fix): centering, band AND approach are ALL paid ONLY on a
+    valid detection. The only way to earn reward is to keep the target in the camera. This
+    closes the loophole where the GT band reward paid for the right distance even while BLIND
+    — which let the policy sink below the target (target leaves the top of frame → no ey
+    signal → stuck low, blind, but still collecting distance credit). Now a blind step scores
+    only −P_lost, so keeping the target framed (hence matching altitude + yaw) is non-optional.
+    All per-step terms are BOUNDED to ~[-1,1] so the reward stays on one scale."""
+    if valid:
+        # centering: exp bump in [0,1], peaks +A when centered
+        r_center = p['A'] * math.exp(-(ex*ex + ey*ey) / (p['sigma']**2))
+        # band: +1 inside [6,7]; bounded linear penalty outside (clipped to −band_pen_cap)
+        bcap = p.get('band_pen_cap', 1.0)
+        if math.isnan(d_true):        r_band = 0.0
+        elif d_true < p['band_lo']:   r_band = max(-bcap, -p['w_d'] * (p['band_lo'] - d_true))
+        elif d_true > p['band_hi']:   r_band = max(-bcap, -p['w_d'] * (d_true - p['band_hi']))
+        else:                         r_band = 1.0
+        # approach: bounded positive signal for closing distance when outside band
+        r_approach = 0.0
+        if (d_prev is not None and not math.isnan(d_true) and not math.isnan(d_prev)
+                and d_true > p['band_hi']):
+            r_approach = min(p.get('approach_cap', 1.0), p['w_approach'] * max(0.0, d_prev - d_true))
+    else:
+        # BLIND: target not in the camera → NO centering/band/approach credit. GT distance must
+        # not pay while the target is unseen, or the policy loiters at the right range blind.
+        r_center = r_band = r_approach = 0.0
+    # anti-hover + smoothness are action-shaping, applied every step.
     r_vel = p.get('w_vel', 0.0) * float(np.linalg.norm(np.asarray(a, dtype=np.float32)))
     da = np.asarray(a) - np.asarray(prev_a)
     r_smooth = max(-p.get('smooth_cap', 1.0), -p['w_s'] * float(np.dot(da, da)))
@@ -117,7 +127,7 @@ def compute_reward(p, a, prev_a, ex, ey, d_true, valid, t_lost, d_prev=None):
     reward = r_center + r_band + r_approach + r_vel + r_smooth + r_lost
     terminated = False; reason = ""
     if (not math.isnan(d_true)) and d_true < p['d_min']:
-        reward -= p['P_safe']; terminated = True; reason = "collision"
+        reward -= p['P_safe']; terminated = True; reason = "collision"   # GT safety, even if blind
     elif t_lost > p['loss_secs']:
         reward -= p['P_lost_final']; terminated = True; reason = "lost"
     return reward, terminated, reason
@@ -397,7 +407,10 @@ if _GYM:
             # on the ROS side — MAVROS converts ENU→NED internally, so vz POSITIVE = UP and
             # vz NEGATIVE = DOWN. The old code assumed NED (positive=down) and inverted every
             # altitude clamp: the ceiling forced vz=+2.5 to "descend" → drone climbed to 378 m.
-            ALT_FLOOR = 8.0
+            ALT_FLOOR = 11.0   # raised 8→11 (2026-08-24): target orbits at ~14 m (its Z_FLOOR=12);
+                               # an 8 m floor let the chaser sink ~6 m below → target left the top
+                               # of the camera FOV → no ey signal → stuck low. 11 m keeps the chaser
+                               # in the band where the target stays framable and ey stays informative.
             ALT_CEIL  = 22.0
             alt = self.ob.chaser_alt
             if alt < ALT_FLOOR:
@@ -618,8 +631,8 @@ if _GYM:
                     # Critical: without this, a chaser that DROPPED below target altitude keeps
                     # sinking (vz toward target < 0) for the full 15-s timeout, crashing.
                     _alt = self.ob.chaser_alt
-                    if _alt < 8.0:
-                        _climb = min(2.5, 1.5 * max(1.0, 8.0 - _alt))   # +vz = UP
+                    if _alt < 11.0:   # match step() ALT_FLOOR (raised 8→11, keeps target framable)
+                        _climb = min(2.5, 1.5 * max(1.0, 11.0 - _alt))   # +vz = UP
                         if vz_ned < _climb:
                             vz_ned = _climb
                             rospy.logwarn_throttle(2.0,
