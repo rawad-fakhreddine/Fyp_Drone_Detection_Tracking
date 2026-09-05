@@ -8,8 +8,11 @@ set -u
 source /opt/ros/noetic/setup.bash
 source ~/catkin_ws/devel/setup.bash
 RUN=~/catkin_ws/src/drone_tracking/scripts/robust_run.sh
-OUT=/tmp/ms4_batch_results.txt
-touch "$OUT"
+CMPDIR="$HOME/fyp/Results/comparison_baylands"
+mkdir -p "$CMPDIR/csv"
+OUT="${OUT:-$CMPDIR/ledger.txt}"
+DETAILS="$CMPDIR/metrics.tsv"
+touch "$OUT" "$DETAILS"
 # TRAJ_TRACK_KP (2026-08-06, Rawad): lock the closed-form targets (T1/T4/T5/T8)
 # onto their exact ideal path so they match spec (T1=point, T4/T8=8 m circle,
 # T5=figure-8) instead of open-loop drifting 3-4 m over 200 s. Target-side
@@ -17,7 +20,7 @@ touch "$OUT"
 # the uniform rule. Only acts on t in (1,4,5,8) internally; T2/3/6/7 ignore it.
 export SPAWN_YAW=90 START_DIST=8 VIEWER=0 SNAP=0 LOSS_TIMEOUT=60 STUCK_TIMEOUT=15
 export TRAJ_TRACK_KP=1.0 TRAJ_TRACK_CAP=2.5
-SEEDS="42 43 45 46 47 48 49 50"
+SEEDS="${SEEDS:-42 43 45 46 47 48 49 50}"
 
 env_for_traj(){ # sets scenario env for trajectory $1
   unset KI_Z INT_Z_MAX INT_Z_BLEED MAX_VZ CHASER_ZDN KP_Z MAX_ACCEL_VZ D_LPF \
@@ -82,17 +85,21 @@ for cell in $CELLS; do
   if [ "$MEM" -lt 2500 ]; then
     echo "HALT: memavail ${MEM}MB before $LBL" >> "$OUT"; cat "$OUT"; exit 2
   fi
-  CSV=$(bash "$RUN" "ms6_$LBL" "$CFG" "$TRAJ" 1 "$SEED" "${DUR:-150}" | tail -1)
+  CSV=$(bash "$RUN" "cmp_$LBL" "$CFG" "$TRAJ" 1 "$SEED" "${DUR:-150}" | tail -1)
   read DET DET1 DET2 THOLD TCLOSE TDUR TTRK <<< "$(stats "$CSV")"
   echo "$LBL $CSV det=$DET start=$DET1 end=$DET2 hold=$THOLD track=$TTRK closest=$TCLOSE dur=$TDUR mem=${MEM}MB" >> "$OUT"
-  if python3 -c "exit(0 if (0<=$DET2<${DET2_MIN:-1} and $DET2<=$DET1-25) or (0<=$DET<${DET_MIN:-60}) else 1)"; then
+  # CMP: save the raw CSV + the UNIFIED HOLD metric (same analyzer as C3) per cell
+  cp "$CSV" "$CMPDIR/csv/${LBL}.csv" 2>/dev/null
+  { printf '%s\t' "$LBL"; python3 /home/rawad/fyp/rl/osc_analyze.py "$CSV" "$LBL" 2>/dev/null | tr '\n' '\t'; echo; } >> "$DETAILS"
+  if python3 -c "exit(0 if (0<=$DET2<=$DET1-25) or (0<=$DET<60) else 1)"; then
     echo "HALT: degradation canary ($DET / $DET1->$DET2) at $LBL" >> "$OUT"; cat "$OUT"; exit 3
   fi
   # gate on TRACK% (data-computed station-keeping), abort, and the 2 m bar;
   # phase-HOLD stays logged for continuity but no longer gates.
-  if python3 -c "exit(0 if (0<=$TTRK<${TRK_MIN:-85}) or (0<$TDUR<${DUR_MIN:-145}) or (0<$TCLOSE<1.5) else 1)"; then
-    echo "HALT-FOR-DISCUSSION: $LBL tracking failure (track=$TTRK closest=$TCLOSE dur=${TDUR}s)" >> "$OUT"
-    echo "CAMPAIGN HALTED (tracking failure)" >> "$OUT"; cat "$OUT"; exit 5
+  # CMP mode: record weak/close tracking as a WARN and CONTINUE (collect all cells;
+  # dur<195 gate dropped since DUR=150). Degradation canary (det) above STILL halts.
+  if python3 -c "exit(0 if (0<=$TTRK<70) or (0<$TCLOSE<1.5) else 1)"; then
+    echo "  WARN: $LBL weak/close (track=$TTRK closest=$TCLOSE dur=${TDUR}s)" >> "$OUT"
   fi
   # F8 acceptance (Rawad 2026-07-18): 1.5-2.0 m passes = recorded WARN, not a halt
   python3 -c "exit(0 if 1.5<=$TCLOSE<2.0 else 1)" && echo "  WARN: near-bar pass $TCLOSE m at $LBL — record in 08_Failures" >> "$OUT"
