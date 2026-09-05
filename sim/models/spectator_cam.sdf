@@ -1,0 +1,48 @@
+<?xml version='1.0'?>
+<!-- M-C spectator camera. KINEMATIC (movable via /gazebo/set_model_state, no
+     gravity) so spectator_tracker.py can follow the drones; also works as a
+     fixed camera if the tracker isn't run. Publishes
+     /spectator_cam/spectator_cam/image_raw (800x600, 30Hz). Optical axis = +X. -->
+<sdf version='1.6'>
+  <model name='spectator_cam'>
+    <static>false</static>
+    <link name='link'>
+      <gravity>0</gravity>
+      <kinematic>1</kinematic>
+      <inertial>
+        <mass>0.1</mass>
+        <inertia><ixx>1e-4</ixx><ixy>0</ixy><ixz>0</ixz>
+                 <iyy>1e-4</iyy><iyz>0</iyz><izz>1e-4</izz></inertia>
+      </inertial>
+      <visual name='visual'>
+        <geometry><box><size>0.3 0.3 0.3</size></box></geometry>
+        <material><ambient>0.1 0.1 0.1 1</ambient></material>
+      </visual>
+      <sensor name='camera' type='camera'>
+        <camera name='__default__'>
+          <horizontal_fov>0.9</horizontal_fov>
+          <image>
+            <width>800</width>
+            <height>600</height>
+          </image>
+          <clip>
+            <near>0.1</near>
+            <far>600</far>
+          </clip>
+        </camera>
+        <always_on>1</always_on>
+        <update_rate>30</update_rate>
+        <visualize>1</visualize>
+        <plugin name='spectator_cam_plugin' filename='libgazebo_ros_camera.so'>
+          <robotNamespace></robotNamespace>
+          <alwaysOn>true</alwaysOn>
+          <imageTopicName>image_raw</imageTopicName>
+          <cameraInfoTopicName>camera_info</cameraInfoTopicName>
+          <cameraName>spectator_cam</cameraName>
+          <frameName>spectator_cam_link</frameName>
+          <updateRate>30.0</updateRate>
+        </plugin>
+      </sensor>
+    </link>
+  </model>
+</sdf>

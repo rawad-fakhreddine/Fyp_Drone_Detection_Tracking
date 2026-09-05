@@ -1,0 +1,60 @@
+<?xml version="1.0" ?>
+<!-- Lightweight world for RL training: no terrain, no trees, no heavy meshes.
+     LOCKSTEP faster-than-real RL training config (2026-08-23, empirically tuned):
+       In lockstep PX4 gates each step (~4 ms round-trip on WSL2), so
+       RTF ≈ max_step_size / round_trip. At 0.004 → ~1×. Bumping the step size is
+       THE lever: it cuts the number of gated PX4 round-trips per sim-second.
+       CEILING FOUND EMPIRICALLY: max_step_size=0.010 core-dumps gzserver — the
+       stiff PX4 iris rotor/lift-drag model goes unstable (NaN) within the first
+       physics steps after spawn. So the step size is bounded by iris stability,
+       NOT by the theoretical 2.5×. Converging upward from the known-good 0.004.
+       real_time_update_rate=250: CAPS step rate so the empty world does NOT
+         free-run before spawn (rtu=0 → ~20× runaway clock → spawn race → abort).
+         ceiling = rtu × step. iters kept at 10 (solver accuracy) while tuning step.
+       real_time_factor: target ratio (= rtu × step); lockstep tops out here.
+     Use: WORLD=rl_empty HEADLESS=1 bash launch_stack.sh   (lockstep — no NO_LOCKSTEP)
+     Do NOT set PX4_SIM_SPEED_FACTOR in lockstep mode — causes EKF filter faults. -->
+<sdf version="1.5">
+  <world name="rl_empty">
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+
+    <!-- Minimal sky so the FPV camera has a contrasting background -->
+    <scene>
+      <sky>
+        <clouds>
+          <speed>0</speed>
+        </clouds>
+      </sky>
+      <ambient>0.5 0.5 0.5 1</ambient>
+      <background>0.5 0.7 1.0 1</background>
+      <shadows>0</shadows>
+    </scene>
+
+    <physics name='default_physics' default='0' type='ode'>
+      <gravity>0 0 -9.8066</gravity>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>10</iters>
+          <sor>1.3</sor>
+          <use_dynamic_moi_rescaling>0</use_dynamic_moi_rescaling>
+        </solver>
+        <constraints>
+          <cfm>0</cfm>
+          <erp>0.2</erp>
+          <contact_max_correcting_vel>100</contact_max_correcting_vel>
+          <contact_surface_layer>0.001</contact_surface_layer>
+        </constraints>
+      </ode>
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+      <magnetic_field>6.0e-6 2.3e-5 -4.2e-5</magnetic_field>
+    </physics>
+  </world>
+</sdf>
