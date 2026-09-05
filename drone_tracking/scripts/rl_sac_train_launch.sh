@@ -27,15 +27,18 @@ TRAJ="${2:-4}"
 SEED="${3:-42}"
 WORLD="${WORLD:-rl_empty}"
 RESUME="${RESUME:-0}"
+BC="${BC:-0}"                      # BC=1 -> BC-warm-start + relaxable SACBC anchor (14-dim v4)
 
 source /opt/ros/noetic/setup.bash
 source /home/rawad/catkin_ws/devel/setup.bash
 
 SAC_SAVE="${SAC_SAVE:-~/fyp/rl/models/sac}"
-BC_PATH="${BC_PATH:-~/fyp/rl/models/bc_policy_v3.pth}"
+BC_PATH="${BC_PATH:-~/fyp/rl/models/bc_policy_v4.pth}"   # v4 = 14-dim explicit-rate clone
 
 if [ "$RESUME" = "1" ]; then
     SESSION_MODE="RESUME from checkpoint"
+elif [ "$BC" = "1" ]; then
+    SESSION_MODE="BC-warm-start + SACBC anchor (v4 14-dim)"
 else
     SESSION_MODE="scratch (online SAC, ent_coef=auto)"
 fi
@@ -108,8 +111,18 @@ sleep 2  # let target mover start
 SAC_LOG="/tmp/rl_sac_$(date +%Y-%m-%d_%H-%M-%S).log"
 if [ "$RESUME" = "1" ]; then
     TRAIN_FLAGS="--resume"
-    ENT_COEF="0.1"   # fixed — prevent continued collapse from saved low value
-    echo "[RL-T3] Launching rl_train_sac.py --resume --steps=$STEPS ent_coef=0.1 ..."
+    ENT_COEF="${ENT_COEF:-0.1}"   # default 0.1 (prevents collapse from saved low value); overridable
+                                  # via env for the BC1 curriculum, which needs LOW exploration
+                                  # (ent_coef~0.03) or online SAC washes out the BC band-hold prior.
+    echo "[RL-T3] Launching rl_train_sac.py --resume --steps=$STEPS ent_coef=$ENT_COEF ..."
+elif [ "$BC" = "1" ]; then
+    # BC-warm-start + relaxable SACBC anchor. ent_coef FIXED small (auto washes out the
+    # warm-start per 2026-08 note). anchor-ref = same v4 clone; leash w0->0 over bc-anneal.
+    TRAIN_FLAGS="--bc $BC_PATH --anchor --anchor-ref $BC_PATH \
+        --bc-w0 ${BC_W0:-15} --bc-alpha ${BC_ALPHA:-2.5} --bc-anneal ${BC_ANNEAL:-15000} \
+        --log-std ${LOG_STD:--3.0}"
+    ENT_COEF="${ENT_COEF:-0.05}"
+    echo "[RL-T3] Launching rl_train_sac.py --bc(v4) --anchor --steps=$STEPS ent_coef=$ENT_COEF ..."
 else
     TRAIN_FLAGS="--scratch"
     ENT_COEF="auto"  # auto for scratch — targets H=-4
@@ -126,6 +139,34 @@ PYTHONUNBUFFERED=1 rosrun drone_tracking rl_train_sac.py \
     --batch-size 256 \
     --episode-secs "${EP_SECS:-25}" \
     --gt-prefill-steps "${GT_PREFILL:-3000}" \
+    --n-stack "${N_STACK:-1}" \
+    _rew_band_anneal_steps:="${BAND_ANNEAL_STEPS:-0}" \
+    _rew_band_hi_start:="${BAND_HI_START:-9.0}" \
+    _rew_w_d:="${W_D:-0.5}" \
+    _rew_band_bonus:="${BAND_BONUS:-1.5}" \
+    _rew_w_alt:="${W_ALT:-0.25}" \
+    _rew_close_thresh:="${CLOSE_THRESH:-6.0}" \
+    _rew_w_retreat:="${W_RETREAT:-2.0}" \
+    _rew_band_pen_cap:="${BAND_PEN_CAP:-1.0}" \
+    _max_wz:="${MAX_WZ:-0.5}" \
+    _max_vx:="${MAX_VX:-4.0}" \
+    _accel_limit:="${ACCEL_LIMIT:-0.0}" \
+    _accel_limit_wz:="${ACCEL_LIMIT_WZ:-${ACCEL_LIMIT:-0.0}}" \
+    _max_vz:="${MAX_VZ:-2.5}" \
+    _alt_floor:="${ALT_FLOOR:-11.0}" \
+    _alt_ceil:="${ALT_CEIL:-22.0}" \
+    _rew_w_approach:="${W_APPROACH:-1.0}" \
+    _rew_approach_cap:="${APPROACH_CAP:-1.5}" \
+    _rew_sigma:="${SIGMA:-0.6}" \
+    _rew_sigma_far:="${SIGMA_FAR:-0.0}" \
+    _rew_w_pursuit_blind:="${W_PURSUIT_BLIND:-0.0}" \
+    _rew_pursuit_blind_secs:="${PURSUIT_BLIND_SECS:-1.0}" \
+    _rew_pursuit_blind_cap:="${PURSUIT_BLIND_CAP:-1.0}" \
+    _rew_w_ex:="${W_EX:-0.0}" \
+    _rew_w_ddot:="${W_DDOT:-0.0}" \
+    _rew_ddot_ex_gate:="${DDOT_EX_GATE:-0.30}" \
+    _rew_ddot_cap:="${DDOT_CAP:-1.0}" \
+    _mix_trajs:="${MIX_TRAJS:-}" \
     2>&1 | tee "$SAC_LOG"
 
 echo ""

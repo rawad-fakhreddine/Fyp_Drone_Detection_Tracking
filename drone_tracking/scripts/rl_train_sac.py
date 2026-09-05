@@ -67,7 +67,8 @@ def _load_bc_ref(bc_path, device):
     import torch, torch.nn as nn
     ck = torch.load(os.path.expanduser(bc_path), map_location=device, weights_only=False)
     sd = ck['state_dict']
-    net = nn.Sequential(nn.Linear(64, 256), nn.ReLU(), nn.Linear(256, 256), nn.ReLU(),
+    obs_dim = int(ck.get('obs_dim', sd['net.0.weight'].shape[1]))   # 64 (old stack) or 14 (v4)
+    net = nn.Sequential(nn.Linear(obs_dim, 256), nn.ReLU(), nn.Linear(256, 256), nn.ReLU(),
                         nn.Linear(256, 4), nn.Tanh()).to(device)
     with torch.no_grad():
         net[0].weight.copy_(sd['net.0.weight']); net[0].bias.copy_(sd['net.0.bias'])
@@ -79,7 +80,7 @@ def _load_bc_ref(bc_path, device):
     return net
 
 
-def _make_sacbc(bc_ref, bc_w0, bc_alpha, anneal, zero_aprev_ref=True):
+def _make_sacbc(bc_ref, bc_w0, bc_alpha, anneal, aprev_idx=None, zero_aprev_ref=True):
     """SAC subclass with a RELAXABLE behaviour-cloning anchor on the actor loss (the fix
     for the a_prev runaway that keeps the GOOD bc_v2 tracker — see 2026-08-17). The only
     change vs SB3 SAC.train() is the actor objective:
@@ -98,11 +99,14 @@ def _make_sacbc(bc_ref, bc_w0, bc_alpha, anneal, zero_aprev_ref=True):
     from stable_baselines3 import SAC
     from stable_baselines3.common.utils import polyak_update
 
-    # a_prev slots in the 64-dim frame-stacked obs (4 frames x 16, a_prev at 12:16 each).
-    # Zeroing them in the ANCHOR TARGET pulls the actor toward bc_v2's NON-amplifying
-    # response (bc_v2 amplifies a_prev ~8x = the runaway; bc_v2(a_prev=0) is stable) while
-    # the ACTOR still SEES real a_prev for tracking. Diagnosed 2026-08-17.
-    APREV_IDX = [12, 13, 14, 15, 28, 29, 30, 31, 44, 45, 46, 47, 60, 61, 62, 63]
+    # a_prev slots in the obs. Old 64-dim 4-frame stack: a_prev at 12:16 in each frame.
+    # New 14-dim explicit-rate single frame (v4): a_prev at 10:14. Passed in from the call
+    # site (derived from the BC checkpoint's obs_dim/stack_n) so this generalizes.
+    # Zeroing them in the ANCHOR TARGET pulls the actor toward the NON-amplifying response
+    # (BC amplifies a_prev = the runaway; BC(a_prev=0) is stable) while the ACTOR still
+    # SEES real a_prev for tracking. Diagnosed 2026-08-17.
+    APREV_IDX = list(aprev_idx) if aprev_idx is not None else \
+                [12, 13, 14, 15, 28, 29, 30, 31, 44, 45, 46, 47, 60, 61, 62, 63]
 
     class SACBC(SAC):
         def train(self, gradient_steps, batch_size=64):
@@ -266,7 +270,7 @@ def prefill_from_logs(model, src='~/fyp/Results/Config1', since='2026-08-06',
         for j in range(len(Xs) - 1):
             i0, i1 = int(idx[j]), int(idx[j + 1])
             contig = (i1 == i0 + 1)
-            a = Y[i0]; prev_a = X[i0, 12:16]
+            a = Y[i0]; prev_a = X[i0, -4:]        # a_prev = last 4 obs cols (14-dim v4: 10:14; 16-dim: 12:16)
             reward, term, _ = compute_reward(rp, a, prev_a, float(X[i0, 0]),
                                              float(X[i0, 1]), float(D[i0]), 1, 0.0)
             done = (not contig) or term           # truncate at time gaps / terminals
@@ -309,6 +313,16 @@ def build(bc_path=None, seed=0, tb=True, ent_coef=0.02, anchor=None, log_std=-3.
               ent_coef=ent_coef,
               policy_kwargs=dict(net_arch=[256, 256]),  # matches BCPolicy dims
               seed=seed, verbose=1)
+    # TARGET_ENTROPY override (stability lever, 2026-08-24): only active with ent_coef="auto".
+    # SB3's default target_entropy=-action_dim=-4 keeps auto ent_coef ~0.1, which lets a
+    # CONVERGED policy keep exploring and WANDER off its good state late in training (the
+    # recurring detection-collapse ~10-13k seen in s2b/s3/s4/s5). A lower (more negative)
+    # target makes auto ent_coef decay further → policy exploits sooner → less late wander,
+    # while still exploring early (auto starts high). Set via env var TARGET_ENTROPY (e.g. -8).
+    _tent = os.environ.get('TARGET_ENTROPY', '').strip()
+    if _tent:
+        kw['target_entropy'] = float(_tent)
+        print(f"[sac] target_entropy override = {_tent} (lower = exploit sooner, less late wander)")
     if tb:                                         # tensorboard is optional (may be absent)
         try:
             import tensorboard  # noqa: F401
@@ -318,8 +332,13 @@ def build(bc_path=None, seed=0, tb=True, ent_coef=0.02, anchor=None, log_std=-3.
 
     if anchor:
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # derive a_prev indices from the BC checkpoint layout (14-dim single-frame v4 -> [10,11,12,13];
+        # 64-dim 4-frame -> [12..15,28..31,44..47,60..63]) so the anchor generalizes.
+        _ck = torch.load(os.path.expanduser(anchor['ref']), map_location='cpu', weights_only=False)
+        _sn = int(_ck.get('stack_n', 4)); _od = int(_ck.get('obs_dim', 64)); _fr = _od // max(_sn, 1)
+        _apidx = [k*_fr + _fr - 4 + j for k in range(_sn) for j in range(4)]
         bc_ref = _load_bc_ref(anchor['ref'], device)
-        SACBC = _make_sacbc(bc_ref, anchor['w0'], anchor['alpha'], anchor['anneal'])
+        SACBC = _make_sacbc(bc_ref, anchor['w0'], anchor['alpha'], anchor['anneal'], aprev_idx=_apidx)
         model = SACBC("MlpPolicy", venv, **kw)
         print(f"[sac] BC ANCHOR on: ref={anchor['ref']} w0={anchor['w0']} "
               f"alpha={anchor['alpha']} anneal={anchor['anneal']}")
@@ -366,6 +385,22 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
         if os.path.exists(buf_path):
             model.load_replay_buffer(buf_path)
             print(f"[sac] replay buffer restored ({model.replay_buffer.size()} transitions)")
+        # FORCE fixed ent_coef on resume when a numeric --ent-coef is given. SAC.load restores
+        # the checkpoint's entropy config (often "auto"), silently ignoring the CLI value — so a
+        # resume meant to EXPLOIT (low fixed ent_coef) would keep auto-exploring at the old high
+        # coef (observed: --ent-coef 0.02 resume ran at ent_coef≈0.14). Override the loaded model.
+        if not (isinstance(ent_coef, str) and str(ent_coef).startswith('auto')):
+            import torch as th
+            # ent_coef (the hyperparam string/float) must ALSO become the float, or SAC.load on
+            # the resulting checkpoint rebuilds an AUTO model that expects an ent_coef_optimizer the
+            # saved torch params no longer have → load KeyError. Setting it float makes reload build
+            # a fixed-ent model that matches. (Recover an already-broken zip via SAC.load with
+            # custom_objects={'ent_coef': <float>}.)
+            model.ent_coef = float(ent_coef)
+            model.ent_coef_optimizer = None
+            model.log_ent_coef = None
+            model.ent_coef_tensor = th.tensor(float(ent_coef), device=model.device)
+            print(f"[sac] resume: FORCED fixed ent_coef = {float(ent_coef):.4f} (exploit, was auto)")
         reset_num = False
     elif not resume and not prefill:
         # SCRATCH mode: GT-heuristic prefill — approach target using GT position to
@@ -400,6 +435,11 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
                 p.requires_grad_(True)
             print(f"[sac] critic pretrain done in {_time.time()-t0:.0f}s "
                   f"(n_updates={model._n_updates})")
+            # CRITICAL (2026-09-04): the stdout logger above set _custom_logger=True, so
+            # learn() would KEEP it and NEVER create the TensorBoard run dir (supervisor
+            # requires TB live). Clear the flag so _setup_learn rebuilds the proper
+            # TB+stdout logger from self.tensorboard_log.
+            model._custom_logger = False
 
     ckpt = CheckpointCallback(save_freq=max(chunk_steps, 2000),
                               save_path=save_dir, name_prefix='sac_ckpt',
@@ -417,6 +457,11 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
         def __init__(self, window=2000, every=500):
             super().__init__()
             self.d = _deque(maxlen=window); self.valid = _deque(maxlen=window)
+            # centering + speed windows (supervisor 2026-09-04: watch ex/ey off-center and
+            # whether the chaser keeps up with the target). Only accumulate on VALID frames
+            # (ex/ey/d meaningless without a detection; speeds are GT so always valid).
+            self.ex = _deque(maxlen=window); self.ey = _deque(maxlen=window)
+            self.cspd = _deque(maxlen=window); self.tspd = _deque(maxlen=window)
             self.n_coll = 0; self.n_lost = 0; self.every = every
             self.lo = _RD['band_lo']; self.hi = _RD['band_hi']
             self.close = _RD.get('close_thresh', 5.0)
@@ -426,7 +471,15 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
                 dt = inf.get('true_dist', float('nan'))
                 if dt == dt:                       # not NaN
                     self.d.append(dt)
-                self.valid.append(int(inf.get('valid', 0)))
+                v = int(inf.get('valid', 0))
+                self.valid.append(v)
+                if v:                              # centering only meaningful when detecting
+                    ex = inf.get('ex', float('nan')); ey = inf.get('ey_c', float('nan'))
+                    if ex == ex: self.ex.append(abs(ex))
+                    if ey == ey: self.ey.append(abs(ey))
+                cs = inf.get('chaser_spd', float('nan')); ts = inf.get('target_spd', float('nan'))
+                if cs == cs: self.cspd.append(cs)
+                if ts == ts: self.tspd.append(ts)
                 r = inf.get('term_reason', '')
                 if r == 'collision':   self.n_coll += 1
                 elif r == 'lost':      self.n_lost += 1
@@ -441,10 +494,75 @@ def train(bc_path, total_steps, chunk_steps, save_dir, seed, resume, ent_coef=0.
                 self.logger.record('track/too_close_frac', float(_np.mean(d < self.close)))
                 self.logger.record('track/collisions_cum', self.n_coll)
                 self.logger.record('track/lost_cum', self.n_lost)
+                # --- centering (ex/ey) ---
+                if len(self.ex) > 0:
+                    ax = _np.asarray(self.ex); ay = _np.asarray(self.ey)
+                    self.logger.record('track/ex_abs_mean', float(_np.mean(ax)))
+                    self.logger.record('track/ey_abs_mean', float(_np.mean(ay)))
+                    # visual-lock = centered (|ex|<0.30 AND |ey_c|<0.30), the HOLD centering gate
+                    n = min(len(ax), len(ay))
+                    self.logger.record('track/centered_frac',
+                                       float(_np.mean((ax[:n] < 0.30) & (ay[:n] < 0.30))))
+                # --- chaser vs target speed (does the chaser keep up?) ---
+                if len(self.cspd) > 0 and len(self.tspd) > 0:
+                    cm = float(_np.mean(self.cspd)); tm = float(_np.mean(self.tspd))
+                    self.logger.record('track/chaser_spd_mean', cm)
+                    self.logger.record('track/target_spd_mean', tm)
+                    self.logger.record('track/speed_deficit', tm - cm)  # >0 = falling behind
+            return True
+
+    # ---- STOP-ON-MAX-REWARD (supervisor directive 2026-09-04) ----
+    # Do NOT stop the run because a step/time budget expired — keep training and stop
+    # when the reward has MAXED OUT (plateaued). Every check window we read the Monitor's
+    # rolling ep_rew_mean; a new max saves sac_best.zip (+buffer); no improvement for
+    # `patience` consecutive checks => the reward has converged at its max => stop.
+    # An optional hard REWARD_THRESHOLD stops immediately once reached. All env-tunable.
+    class StopOnMaxReward(BaseCallback):
+        def __init__(self):
+            super().__init__()
+            self.check_every = int(os.environ.get('STOP_CHECK_EVERY', 2000))
+            self.patience    = int(os.environ.get('STOP_PATIENCE', 25))
+            self.min_delta   = float(os.environ.get('STOP_MIN_DELTA', 1.0))
+            self.warmup      = int(os.environ.get('STOP_WARMUP', 15000))
+            _thr = os.environ.get('REWARD_THRESHOLD', '').strip()
+            self.threshold   = float(_thr) if _thr else None
+            self.best = -1e18; self.no_improve = 0
+            self.best_path = os.path.join(save_dir, 'sac_best')
+
+        def _save_best(self, tag):
+            self.model.save(self.best_path)
+            self.model.save_replay_buffer(self.best_path + '_replay.pkl')
+            print(f"[sac] *** NEW BEST ep_rew_mean={self.best:.2f} @ {self.num_timesteps} "
+                  f"-> saved {self.best_path}.zip ({tag})")
+
+        def _on_step(self):
+            if self.num_timesteps % self.check_every != 0:
+                return True
+            buf = self.model.ep_info_buffer
+            if not buf or len(buf) < 3:
+                return True
+            mean_r = float(np.mean([e['r'] for e in buf]))
+            self.logger.record('track/ep_rew_mean_win', mean_r)
+            self.logger.record('track/best_ep_rew', self.best if self.best > -1e17 else mean_r)
+            self.logger.record('track/no_improve_checks', self.no_improve)
+            if mean_r > self.best + self.min_delta:
+                self.best = mean_r; self.no_improve = 0
+                self._save_best('new-max')
+            else:
+                self.no_improve += 1
+            if self.threshold is not None and mean_r >= self.threshold:
+                print(f"[sac] STOP: ep_rew_mean {mean_r:.2f} >= REWARD_THRESHOLD "
+                      f"{self.threshold:.2f} -> reward target reached")
+                return False
+            if self.num_timesteps >= self.warmup and self.no_improve >= self.patience:
+                print(f"[sac] STOP: reward MAXED OUT — no improvement over {self.min_delta} "
+                      f"for {self.patience} checks (best={self.best:.2f}, last={mean_r:.2f})")
+                return False
             return True
 
     try:
-        model.learn(total_timesteps=total_steps, callback=[ckpt, TBStats()],
+        model.learn(total_timesteps=total_steps,
+                    callback=[ckpt, TBStats(), StopOnMaxReward()],
                     reset_num_timesteps=reset_num, progress_bar=False,
                     log_interval=1)   # dump TensorBoard scalars EVERY episode (fast feedback)
     finally:

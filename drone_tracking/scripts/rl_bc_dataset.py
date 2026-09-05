@@ -39,17 +39,17 @@ import numpy as np
 
 # ---- constants: MUST match rl_env.py -----------------------------------------
 K_CAL      = 0.077
-CAPS       = np.array([8.0, 1.2, 2.5, 0.5], dtype=np.float32)
+CAPS       = np.array([float(os.environ.get('BC_MAX_VX', 4.0)), 1.2, 2.5, 0.5], dtype=np.float32)  # BC_MAX_VX env → match deploy max_vx (T3 fix uses 6)
 RATE_LPF   = 0.6
 ASPECT_R   = 3.3     # measured live box aspect (w~43px / h~13px at 6-7 m); was 2.0
 CONF_PROXY = 0.85    # live YOLO conf ~0.8 on REAL frames; was a 1.0 proxy
 AREA_NORM  = 640.0 * 480.0
-STACK_N    = 4
+STACK_N    = 1     # v4: current env is explicit-rate single-frame (14-dim, no frame-stack)
 OBS_NAMES  = ["ex","ey","d_hat","dex","dey","dd","w","h","conf","t_nodet",
-              "pitch","roll","a_vx","a_vy","a_vz","a_wz"]
+              "a_vx","a_vy","a_vz","a_wz"]   # v4: 14-dim, pitch/roll REMOVED (explicit-rate env 2026-08-18)
 
-def normalize(ex, ey, d, dex, dey, dd, w, h, conf, t_nd, pitch, roll, a_prev):
-    """Identical clipping/scaling to rl_env.ObsBuilder.build()."""
+def normalize(ex, ey, d, dex, dey, dd, w, h, conf, t_nd, a_prev):
+    """Identical clipping/scaling to rl_env.ObsBuilder.build() (14-dim explicit-rate)."""
     return np.array([
         np.clip(ex, -1.5, 1.5),
         np.clip(ey, -1.5, 1.5),
@@ -61,8 +61,6 @@ def normalize(ex, ey, d, dex, dey, dd, w, h, conf, t_nd, pitch, roll, a_prev):
         np.clip(h / 100.0, 0.0, 3.0),
         np.clip(conf, 0.0, 1.0),
         min(t_nd, 1.0),
-        np.clip(pitch / 0.5, -1.0, 1.0),
-        np.clip(roll  / 0.5, -1.0, 1.0),
         a_prev[0], a_prev[1], a_prev[2], a_prev[3],
     ], dtype=np.float32)
 
@@ -106,7 +104,6 @@ def convert_file(path):
                     f(row,'ex_ctrl',0), f(row,'ey_ctrl',0), d,
                     f(row,'dex',0), f(row,'dey',0), dd,
                     w, h, CONF_PROXY, t_nd,
-                    math.radians(f(row,'pitch_deg',0)), math.radians(f(row,'roll_deg',0)),
                     a_prev)
                 X.append(obs); Y.append(cmd_n); T.append(t)
                 D.append(f(row, 'true_dist_3d'))     # GT distance for RL reward recompute
@@ -117,8 +114,9 @@ def convert_file(path):
             np.array(T), np.array(D, dtype=np.float32))
 
 def stack(X, T):
-    """(n,16),(n,) -> (m, 16*STACK_N) oldest-first, only over contiguous time."""
-    if len(X) < STACK_N: return np.zeros((0, 16*STACK_N), dtype=np.float32), np.zeros(0, dtype=np.int64)
+    """(n,F),(n,) -> (m, F*STACK_N) oldest-first, only over contiguous time. F=14 (v4)."""
+    F = X.shape[1] if len(X) else len(OBS_NAMES)
+    if len(X) < STACK_N: return np.zeros((0, F*STACK_N), dtype=np.float32), np.zeros(0, dtype=np.int64)
     idx = []
     for i in range(STACK_N-1, len(X)):
         if T[i] - T[i-STACK_N+1] < 0.15*STACK_N:
@@ -157,7 +155,7 @@ def main():
         X, Y, T, _D = convert_file(p)          # _D (GT dist) used by the RL prefill, not BC
         if len(X) < STACK_N: continue
         if a.zero_aprev and len(X):
-            X[:, 12:16] = 0.0                  # a_vx,a_vy,a_vz,a_wz -> ignored by the clone
+            X[:, 10:14] = 0.0                  # a_vx,a_vy,a_vz,a_wz (14-dim v4) -> ignored by the clone
         Xs, idx = stack(X, T)
         dst = va if p in val_set else tr
         dst['X'].append(X); dst['Y'].append(Y)

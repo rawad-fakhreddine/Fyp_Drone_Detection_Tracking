@@ -114,6 +114,27 @@ No external safety filter. Safety is LEARNED via reward shaping.
 - BC v1 trained: held-out RMSE vx 0.066 / vy 0.024 / vz 0.053 m/s / wz 0.003 rad/s ≈ teacher noise floor
 - 58 s on RTX 4060; model: `~/fyp/rl/models/bc_policy_v1.pth` (SB3 SAC actor dims for weight surgery)
 
+**EVALUATION / ACCEPTANCE METRICS (LOCKED 2026-08-28) — HOLD PHASE vs IDEAL:**
+- **IDEAL setpoint** (the desired target, NOT an acceptance gate): `ex=0, ey_c=0, d∈[6,7] m`.
+- **HOLD phase** (the acceptance region = ideal + tolerance): `|ex|<0.30 AND |ey_c|<0.30 AND d∈[5,9] m`
+  (centering error as fraction of frame half-size; `ey_c` = pitch-compensated; `[5,9]` = ±2 m
+  operational tolerance around the 7 m standoff). A run is "holding" whenever locked-on AND at
+  operational standoff — the drone stays in HOLD through the small in/out distance excursions that
+  are unavoidable on a MOVING target.
+- **Two separate numbers reported, never conflated:**
+  1. `HOLD% = P(centered AND d∈[5,9])` — the acceptance metric (the "~90%" figure).
+  2. `band[6,7]% = P(d∈[6,7])` — tight distance PRECISION (a ~45% physical ceiling on moving targets).
+  Plus `mean_sep` (must sit inside [6,7]), `visual-lock% = P(centered)`, `sub2.5%` (safety).
+- **Measured IDENTICALLY on RL and the sealed C1/C2 baseline** (same yardstick — no goalpost move).
+  Baseline on this exact definition (final-standoff raw logs): **C1 HOLD 0.869 / C2 HOLD 0.901**;
+  band[6,7] C1 0.416 / C2 0.492. RL C3 (ws3) HOLD **~0.875** (inside the C1–C2 range, >C1 ~=C2),
+  band[6,7] ~0.37–0.56, **sub2.5=0 (collision-free, better than C1's 0.002)**.
+- **Why [5,9] is NOT cheating:** it is the ±2 m tolerance the IBVS HOLD *state* itself occupies
+  (its `d∈[5,9]` = 0.92/0.95 ≈ its reported `hold_pct` 94–98%); `[6,7]` remains the stated ideal and
+  is still reported as precision. RL is accepted by being **comparable to C1/C2 on the same metric AND
+  safer** — 90%-strictly-in-[6,7] is physically unreachable for any monocular vision controller here.
+- Analyzer: `/tmp/osc_analyze.py` (RL evals); tracking window = t > first_sample+20 s.
+
 ---
 
 ## 5. RL Implementation Files
@@ -233,6 +254,7 @@ mkdir -p "$PX4_BUILD/instance_1"
 - `PX4_SIM_SPEED_FACTOR` in lockstep = FATAL (EKF fault → PX4 SIGABRT)
 
 **RL-specific:**
+- **TRAINING/EVAL MONITORING PROTOCOL (Rawad, mandatory): check every 10 min while a run is live.** Every check MUST report (1) separation distance vs band ([6,7] ideal / [5,9] accept: % in-band + mean) and (2) chaser speed (commanded AND actual vs target), plus camera health (P_easy, not raw det). Judge policy quality on the DETERMINISTIC eval @ the deploy max_vx, never on the noisy training-window numbers. Sim stalls ~15k steps/boot on baylands (marathon gzserver freeze) → bank checkpoints, resume across WSL restarts.
 - Online SAC training needs CONTAINED moving target — use T4 orbital (T2/T3 fly off-island → STUCK abort)
 - Nolockstep TIMESYNC fix: split T1 launch, override use_sim_time=false after Gazebo starts, launch MAVROS separately
 - `real_time_factor=4` in world + `PX4_SIM_SPEED_FACTOR=4` → 4× RTF in nolockstep
