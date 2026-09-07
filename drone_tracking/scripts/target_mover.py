@@ -73,7 +73,7 @@ Phase flow: WAITING → RISING → SETTLING → MOVING
 import math, random, rospy
 from mavros_msgs.msg import PositionTarget
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String, Bool, Float32MultiArray
+from std_msgs.msg import String, Bool, Float32MultiArray, Int32
 from gazebo_msgs.msg import ModelStates
 
 VEL_YR_MASK = (
@@ -315,6 +315,11 @@ class TargetMover:
                          Bool, self._takeoff_ready_cb, queue_size=1)
         rospy.Subscriber('/gazebo/model_states',
                          ModelStates, self._gazebo_states_cb, queue_size=1)
+        # RL mixed-trajectory training (2026-08-27): switch trajectory at runtime so each
+        # RL episode can train on a different target motion. ALWAYS subscribed but DORMANT
+        # in C1/C2 (nothing publishes → no switch → byte-identical behaviour). Only rl_env
+        # in mixed mode publishes here.
+        rospy.Subscriber('/rl/set_target_traj', Int32, self._rl_switch_traj_cb, queue_size=1)
 
         N={1:"Static Hover",2:"Slow Straight",3:"Fast Straight",4:"Circle",
            5:"Lemniscate",6:"Incline Med",7:"Incline Hard",8:"Helix",
@@ -325,6 +330,23 @@ class TargetMover:
         self.rate=rospy.Rate(50); self._run()
 
     # ── Callbacks ─────────────────────────────────────────────────────
+    def _rl_switch_traj_cb(self, m):
+        """RL mixed-trajectory training (2026-08-27, Rawad OK'd this additive change):
+        switch the active trajectory at runtime so each RL episode trains on a different
+        target motion. DORMANT in C1/C2 (no publisher). The new trajectory is re-anchored
+        to the target's CURRENT position via _init_trajectory (which sets _straight_start
+        = current pos), and the elapsed base is reset → smooth switch (every closed-form
+        trajectory has _ideal_pos(e=0) == anchor, so no position jump)."""
+        new = int(m.data)
+        if new not in range(1, 12) or new == self.trajectory:
+            return
+        self.trajectory = new
+        self._traj_init_done = False               # force _init_trajectory re-anchor next tick
+        self._track_int_z = 0.0                    # reset z path-lock integrator
+        if self.motion_start_time is not None:
+            self.motion_start_time = rospy.Time.now()   # reset elapsed → new traj from e=0
+        rospy.loginfo("[TargetMover] RL mixed: switched trajectory -> T%d", new)
+
     def _target_pose_cb(self,m):
         self.pos_x=m.pose.position.x; self.pos_y=m.pose.position.y
         self.pos_z=m.pose.position.z

@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 
 BOX_TIMEOUT = 0.5
-PANEL_H = 420
+PANEL_H = int(__import__('os').environ.get('MV_PANEL_H', '720'))  # panel height px (was 420; higher = sharper video)
 
 
 class MultiRec:
@@ -75,7 +75,10 @@ class MultiRec:
         self.fig = plt.figure(figsize=(5.0, 4.2))
         self.ax = self.fig.add_subplot(111, projection='3d')
         self.fig.tight_layout()               # ONCE — per-frame tight_layout is the fps killer
-        r = rospy.Rate(30)                     # 3-D redraw rate (then render-time limited)
+        # 3-D redraw rate. Was 30 Hz — matplotlib-3D at 30 Hz eats a full core and
+        # STARVES the YOLO detection node (box lags the drone). Default 6 Hz keeps the
+        # trajectory panel smooth enough while leaving CPU for full-speed detection.
+        r = rospy.Rate(float(__import__('os').environ.get('MV_PLOT_HZ', '6')))
         while not rospy.is_shutdown():
             if self.takeoff and len(self.tpath) > 1:
                 try:
@@ -148,12 +151,19 @@ class MultiRec:
         frame = self._compose(fov, spec, plot)
         if self.writer is None:
             h, w = frame.shape[:2]
+            self._wh = (w, h)
             self.writer = cv2.VideoWriter(
                 self.out, cv2.VideoWriter_fourcc(*'mp4v'), self.fps, (w, h))
             if not self.writer.isOpened():
                 rospy.logerr("[multi_rec] cannot open writer %s" % self.out)
                 rospy.signal_shutdown("writer failed")
                 return
+        # Lock every frame to the writer's dimensions. Panel widths can vary
+        # frame-to-frame (placeholder vs rendered 3-D plot, especially at higher
+        # PANEL_H), and VideoWriter SILENTLY DROPS any size-mismatched frame —
+        # that was the 12-frames-only bug at PANEL_H>420.
+        if (frame.shape[1], frame.shape[0]) != self._wh:
+            frame = cv2.resize(frame, self._wh)
         self.writer.write(frame)
         if self.rec_start is None:
             self.rec_start = rospy.Time.now()

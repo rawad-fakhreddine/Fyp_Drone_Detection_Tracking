@@ -20,7 +20,7 @@ Autonomous chaser drone detects, tracks, and follows a target drone using YOLOv8
 **C1/C2 RESULTS** (128 runs: T1–T8 × 8 seeds {42,43,45–50} × C1/C2, zone 1, 200 s):
 - Custody: 100% T1–T6/T8; 98.9% T7 (both configs)
 - HOLD: 94–98% except T3 cosmetic bimodality (T3 hold gate fixed to use pitch-comp ey_c)
-- **THE C1-vs-C2 finding:** yaw-jerk C2 **1.6–3.3× smoother on ALL 8 trajectories**, every p<0.01 — the KF's contribution is smoothness, not tracking accuracy
+- **THE C1-vs-C2 finding:** yaw-jerk C2 **~2–3× smoother on ALL 8 trajectories** (per-traj ratio 1.8–3.0, matrix-wide C1 0.0060 / C2 0.0027 = 2.2×) — the KF's contribution is smoothness, not tracking accuracy
 - Safety: 3 sub-2m passes in 128 runs, all C1, all guarded corner passes; C2 worst 2.33m
 
 **ADDITIVE RULE FOR RL:** Zero edits to `ibvs_controller_node.py`, `kalman_filter_node.py`, or `target_mover.py`. All RL code is new files only.
@@ -126,9 +126,11 @@ No external safety filter. Safety is LEARNED via reward shaping.
   2. `band[6,7]% = P(d∈[6,7])` — tight distance PRECISION (a ~45% physical ceiling on moving targets).
   Plus `mean_sep` (must sit inside [6,7]), `visual-lock% = P(centered)`, `sub2.5%` (safety).
 - **Measured IDENTICALLY on RL and the sealed C1/C2 baseline** (same yardstick — no goalpost move).
-  Baseline on this exact definition (final-standoff raw logs): **C1 HOLD 0.869 / C2 HOLD 0.901**;
-  band[6,7] C1 0.416 / C2 0.492. RL C3 (ws3) HOLD **~0.875** (inside the C1–C2 range, >C1 ~=C2),
-  band[6,7] ~0.37–0.56, **sub2.5=0 (collision-free, better than C1's 0.002)**.
+  Ch5 clean-recompute baseline (canonical_matrix.py, clean single-run files): **C1 HOLD 0.910 /
+  C2 HOLD 0.911**; band[6,7] C1 0.579 / C2 0.574. (NOTE: earlier "C1 0.897/0.816-on-T4" was an
+  ARTIFACT — the T4-C1-s42 run file is a corrupted 144k-row marathon logging det 0.21; clean T4 C1
+  = 0.928. Fixed + propagated across ch5/ch6 2026-09-06. See [[canonical-matrix-selector-and-t4-corrupt]].)
+  RL C3 SAC-on-T2 HOLD **0.849±0.012** (8 seeds), band[6,7] 0.503, **sub2.5=0 (collision-free)**.
 - **Why [5,9] is NOT cheating:** it is the ±2 m tolerance the IBVS HOLD *state* itself occupies
   (its `d∈[5,9]` = 0.92/0.95 ≈ its reported `hold_pct` 94–98%); `[6,7]` remains the stated ideal and
   is still reported as precision. RL is accepted by being **comparable to C1/C2 on the same metric AND

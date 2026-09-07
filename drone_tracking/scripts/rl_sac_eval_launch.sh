@@ -25,6 +25,15 @@ SEED="${3:-42}"
 MODEL="${4:-$HOME/fyp/rl/models/sac/sac_policy.zip}"
 WORLD="${WORLD:-rl_empty}"
 
+# --- Trajectory env: MATCH the sealed C1/C2 baseline (ms6_run_cells.sh env_for_traj) ---
+# Without this, launch_stack defaults to straight_az=random + straight_max=60 -> T2/T3
+# fly a RANDOM diagonal and REVERSE at 60m. The sealed baseline is forward one-way.
+TRAJ_TRACK_KP="${TRAJ_TRACK_KP:-1.0}"; TRAJ_TRACK_CAP="${TRAJ_TRACK_CAP:-2.5}"
+case "$TRAJ" in
+  2|3) STRAIGHT_AZ="${STRAIGHT_AZ:-away}"; STRAIGHT_MAX="${STRAIGHT_MAX:-99999}"; SPAWN_YAW="${SPAWN_YAW:-96}" ;;
+  *)   STRAIGHT_AZ="${STRAIGHT_AZ:-random}"; STRAIGHT_MAX="${STRAIGHT_MAX:-99999}"; SPAWN_YAW="${SPAWN_YAW:-90}" ;;
+esac
+
 source /opt/ros/noetic/setup.bash
 source /home/rawad/catkin_ws/devel/setup.bash
 
@@ -42,6 +51,8 @@ nohup bash -c "
   source /home/rawad/catkin_ws/devel/setup.bash
   WORLD=$WORLD HEADLESS=1 VIEWER=0 \
   SKIP_IBVS=1 LOSS_TIMEOUT=3600 DURATION=3600 \
+  STRAIGHT_AZ=$STRAIGHT_AZ STRAIGHT_MAX=$STRAIGHT_MAX SPAWN_YAW=$SPAWN_YAW \
+  TRAJ_TRACK_KP=$TRAJ_TRACK_KP TRAJ_TRACK_CAP=$TRAJ_TRACK_CAP \
   MAX_CLIMB=3.0 HOVER_HOLD_S=1.0 \
   bash /home/rawad/catkin_ws/src/drone_tracking/scripts/launch_stack.sh 1 $TRAJ 1 $SEED 3600
 " > "$LAUNCH_LOG" 2>&1 &
